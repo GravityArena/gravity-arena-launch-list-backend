@@ -1,0 +1,13 @@
+{
+  "name": "gravity-arena-launch-list-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check api/launch-list.js && node --check src/launch-list.js"
+  }
+}

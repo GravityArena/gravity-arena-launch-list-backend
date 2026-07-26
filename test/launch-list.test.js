@@ -57,6 +57,31 @@ test("handles allowed CORS preflight", async () => {
   );
 });
 
+test("always allows official Gravity Arena origins", async () => {
+  const handler = createLaunchListHandler({
+    environment: {
+      ...environment,
+      ALLOWED_ORIGINS: "\"https://preview.example\""
+    },
+    logger: silentLogger()
+  });
+  const response = createResponse();
+
+  await handler(
+    {
+      method: "OPTIONS",
+      headers: { origin: "https://gravityarena.co.za" }
+    },
+    response
+  );
+
+  assert.equal(response.statusCode, 204);
+  assert.equal(
+    response.headers["Access-Control-Allow-Origin"],
+    "https://gravityarena.co.za"
+  );
+});
+
 test("rejects an unapproved origin", async () => {
   const handler = createLaunchListHandler({
     environment,

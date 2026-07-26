@@ -28,7 +28,7 @@ function parseAllowedOrigins(value) {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
-  return configured.length > 0 ? configured : DEFAULT_ALLOWED_ORIGINS;
+  return [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...configured])];
 }
 
 function applyCors(request, response, allowedOrigins) {

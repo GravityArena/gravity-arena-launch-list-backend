@@ -50,14 +50,13 @@ async function askHermes(userText) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userText },
       ],
-      temperature: 0.3,
-      max_tokens: 350,
+      max_completion_tokens: 350,
     }),
   });
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`Hermes API failed (${response.status}): ${detail.slice(0, 300)}`);
+    throw new Error(`Hermes API failed (${response.status}): ${detail.slice(0, 500)}`);
   }
 
   const data = await response.json();
@@ -93,7 +92,7 @@ async function sendWhatsAppText(to, text) {
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`WhatsApp send failed (${response.status}): ${detail.slice(0, 300)}`);
+    throw new Error(`WhatsApp send failed (${response.status}): ${detail.slice(0, 500)}`);
   }
 }
 
@@ -121,8 +120,14 @@ export default async function handler(req, res) {
     const payload = parseBody(req);
     const messages = getIncomingMessages(payload);
 
-    // Meta expects a fast 200 response. This implementation handles the small
-    // Phase 1 workload inline; move processing to a queue before higher volume.
+    console.log("WhatsApp webhook received", {
+      object: payload.object,
+      messageCount: messages.length,
+      fields: (payload.entry || []).flatMap((entry) =>
+        (entry.changes || []).map((change) => change.field)
+      ),
+    });
+
     for (const message of messages) {
       const reply = await askHermes(message.text);
       await sendWhatsAppText(message.from, reply);
@@ -138,8 +143,6 @@ export default async function handler(req, res) {
       message: error instanceof Error ? error.message : String(error),
     });
 
-    // Return 200 so Meta does not repeatedly redeliver a message while the
-    // integration is being configured. Production queueing will add retries.
     return res.status(200).json({ ok: false, processed: 0 });
   }
 }

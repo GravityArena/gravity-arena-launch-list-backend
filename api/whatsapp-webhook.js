@@ -1,5 +1,21 @@
-const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 const MEMORY_HISTORY_LIMIT = 12;
+const DEFAULT_HANDOVER_KEYWORDS = [
+  "human",
+  "agent",
+  "person",
+  "someone",
+  "call me",
+  "phone me",
+  "complaint",
+  "manager",
+  "refund",
+  "quotation",
+  "quote",
+  "urgent",
+  "escalate",
+  "speak to",
+];
 
 function parseBody(req) {
   if (!req.body) return {};
@@ -40,7 +56,6 @@ function getIncomingMessages(payload) {
 function getMemoryConfig() {
   const baseUrl = process.env.MEMORY_API_URL?.trim()?.replace(/\/$/, "");
   const apiKey = process.env.MEMORY_API_KEY?.trim();
-
   return baseUrl && apiKey ? { baseUrl, apiKey } : null;
 }
 
@@ -59,13 +74,11 @@ async function memoryRequest(path, options = {}) {
   });
 
   const data = await response.json().catch(() => ({}));
-
   if (!response.ok) {
     throw new Error(
       `Memory API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`
     );
   }
-
   return data;
 }
 
@@ -111,6 +124,118 @@ async function getMemoryHistory(waId) {
     : [];
 }
 
+function extractEmail(text) {
+  return text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || null;
+}
+
+function splitDisplayName(displayName) {
+  const parts = displayName.trim().split(/\s+/).filter(Boolean);
+  return {
+    firstName: parts[0] || "",
+    lastName: parts.slice(1).join(" "),
+  };
+}
+
+function getHandoverKeywords() {
+  const configured = process.env.HUMAN_HANDOVER_KEYWORDS?.split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return configured?.length ? configured : DEFAULT_HANDOVER_KEYWORDS;
+}
+
+function requiresHumanHandover(text) {
+  const normalized = text.toLowerCase();
+  return getHandoverKeywords().some((keyword) => normalized.includes(keyword));
+}
+
+function getBrevoConfig() {
+  const apiKey = process.env.BREVO_API_KEY?.trim();
+  if (!apiKey) return null;
+
+  const listId = Number(process.env.BREVO_LEAD_LIST_ID || 0);
+  return {
+    apiKey,
+    listId: Number.isInteger(listId) && listId > 0 ? listId : null,
+  };
+}
+
+async function brevoRequest(path, options = {}) {
+  const config = getBrevoConfig();
+  if (!config) return null;
+
+  const response = await fetch(`https://api.brevo.com/v3${path}`, {
+    ...options,
+    headers: {
+      "api-key": config.apiKey,
+      accept: "application/json",
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      `Brevo API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`
+    );
+  }
+  return data;
+}
+
+async function captureBrevoLead({ email, waId, displayName }) {
+  if (!email || !getBrevoConfig()) return null;
+
+  const { firstName, lastName } = splitDisplayName(displayName);
+  const listId = getBrevoConfig().listId;
+
+  return brevoRequest("/contacts", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      attributes: {
+        FIRSTNAME: firstName,
+        LASTNAME: lastName,
+        SMS: waId,
+        WHATSAPP: waId,
+      },
+      ...(listId ? { listIds: [listId] } : {}),
+      updateEnabled: true,
+    }),
+  });
+}
+
+async function sendEscalationEmail({ waId, displayName, messageText, history }) {
+  const recipient = process.env.HUMAN_ESCALATION_EMAIL?.trim();
+  const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
+  const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena Hermes";
+  if (!recipient || !senderEmail || !getBrevoConfig()) return null;
+
+  const transcript = history
+    .slice(-8)
+    .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
+    .join("\n");
+
+  return brevoRequest("/smtp/email", {
+    method: "POST",
+    body: JSON.stringify({
+      sender: { email: senderEmail, name: senderName },
+      to: [{ email: recipient, name: "Gravity Arena Team" }],
+      subject: `WhatsApp handover required: ${displayName || waId}`,
+      textContent: [
+        "A customer requested human assistance on WhatsApp.",
+        `Customer: ${displayName || "Unknown"}`,
+        `WhatsApp: ${waId}`,
+        `Latest message: ${messageText}`,
+        "",
+        "Recent conversation:",
+        transcript || "No prior messages available.",
+      ].join("\n"),
+      tags: ["gravity-arena", "whatsapp-handover"],
+    }),
+  });
+}
+
 async function askHermes(userText, history = []) {
   const apiUrl = process.env.HERMES_API_URL?.trim();
   const apiKey = process.env.HERMES_API_KEY?.trim();
@@ -136,19 +261,14 @@ async function askHermes(userText, history = []) {
     },
     body: JSON.stringify({
       model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...conversationMessages,
-      ],
+      messages: [{ role: "system", content: systemPrompt }, ...conversationMessages],
       max_completion_tokens: 350,
     }),
   });
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(
-      `Hermes API failed (${response.status}): ${detail.slice(0, 500)}`
-    );
+    throw new Error(`Hermes API failed (${response.status}): ${detail.slice(0, 500)}`);
   }
 
   const data = await response.json();
@@ -163,9 +283,7 @@ async function sendWhatsAppText(to, text) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
 
   if (!token || !phoneNumberId) {
-    throw new Error(
-      "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required."
-    );
+    throw new Error("WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required.");
   }
 
   const response = await fetch(
@@ -188,9 +306,7 @@ async function sendWhatsAppText(to, text) {
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(
-      `WhatsApp send failed (${response.status}): ${detail.slice(0, 500)}`
-    );
+    throw new Error(`WhatsApp send failed (${response.status}): ${detail.slice(0, 500)}`);
   }
 }
 
@@ -206,10 +322,7 @@ export default async function handler(req, res) {
     if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
       return res.status(200).send(challenge);
     }
-
-    return res
-      .status(403)
-      .json({ ok: false, error: "Webhook verification failed." });
+    return res.status(403).json({ ok: false, error: "Webhook verification failed." });
   }
 
   if (req.method !== "POST") {
@@ -227,6 +340,7 @@ export default async function handler(req, res) {
         (entry.changes || []).map((change) => change.field)
       ),
       memoryEnabled: Boolean(getMemoryConfig()),
+      brevoEnabled: Boolean(getBrevoConfig()),
     });
 
     let processed = 0;
@@ -254,14 +368,54 @@ export default async function handler(req, res) {
         history = (await getMemoryHistory(message.from)) || [];
       } catch (memoryError) {
         console.error("Conversation memory read/write warning", {
-          message:
-            memoryError instanceof Error
-              ? memoryError.message
-              : String(memoryError),
+          message: memoryError instanceof Error ? memoryError.message : String(memoryError),
         });
       }
 
-      const reply = await askHermes(message.text, history);
+      const email = extractEmail(message.text);
+      if (email) {
+        try {
+          await captureBrevoLead({
+            email,
+            waId: message.from,
+            displayName: message.displayName,
+          });
+          console.log("Brevo lead captured", {
+            emailDomain: email.split("@")[1],
+            senderSuffix: message.from.slice(-4),
+          });
+        } catch (brevoError) {
+          console.error("Brevo lead capture warning", {
+            message: brevoError instanceof Error ? brevoError.message : String(brevoError),
+          });
+        }
+      }
+
+      let reply;
+      let handover = false;
+
+      if (requiresHumanHandover(message.text)) {
+        handover = true;
+        reply =
+          process.env.HUMAN_HANDOVER_REPLY?.trim() ||
+          "I have alerted the Gravity Arena team. A team member will contact you as soon as possible. Please share your name, email address and preferred contact time if you have not already done so.";
+
+        try {
+          await sendEscalationEmail({
+            waId: message.from,
+            displayName: message.displayName,
+            messageText: message.text,
+            history,
+          });
+        } catch (brevoError) {
+          console.error("Human escalation notification warning", {
+            message: brevoError instanceof Error ? brevoError.message : String(brevoError),
+          });
+        }
+      } else {
+        reply = await askHermes(message.text, history);
+      }
+
       await sendWhatsAppText(message.from, reply);
 
       try {
@@ -274,10 +428,7 @@ export default async function handler(req, res) {
         });
       } catch (memoryError) {
         console.error("Conversation memory reply-write warning", {
-          message:
-            memoryError instanceof Error
-              ? memoryError.message
-              : String(memoryError),
+          message: memoryError instanceof Error ? memoryError.message : String(memoryError),
         });
       }
 
@@ -287,6 +438,8 @@ export default async function handler(req, res) {
         messageId: message.messageId,
         senderSuffix: message.from?.slice(-4),
         historyMessages: history.length,
+        leadCaptured: Boolean(email),
+        handover,
       });
     }
 
@@ -295,7 +448,6 @@ export default async function handler(req, res) {
     console.error("WhatsApp gateway error", {
       message: error instanceof Error ? error.message : String(error),
     });
-
     return res.status(200).json({ ok: false, processed: 0 });
   }
 }

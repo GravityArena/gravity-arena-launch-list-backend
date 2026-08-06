@@ -521,30 +521,39 @@ try {
           });
         }
       } else if (handoverStatus === "HUMAN_ACTIVE") {
+  aiPaused = true;
+  handover = true;
+
+  reply =
+    process.env.HUMAN_HANDOVER_WAITING_REPLY?.trim() ||
+    "Your conversation is still with the Gravity Arena team. A team member has been notified and will respond as soon as possible. You can continue sending any additional details here.";
+
   console.log("Hermes paused for active human handover", {
     senderSuffix: message.from.slice(-4),
+    statusReplySent: true,
   });
 } else {
   reply = await askHermes(message.text, history);
 }
+if (reply) {
+  await sendWhatsAppText(message.from, reply);
 
-      await sendWhatsAppText(message.from, reply);
-
-try {
-  await saveMemoryMessage({
-    waId: message.from,
-    displayName: message.displayName,
-    direction: "OUTBOUND",
-    role: "assistant",
-    body: reply,
-  });
-} catch (memoryError) {
-  console.error("Conversation memory reply-write warning", {
-    message:
-      memoryError instanceof Error
-        ? memoryError.message
-        : String(memoryError),
-  });
+  try {
+    await saveMemoryMessage({
+      waId: message.from,
+      displayName: message.displayName,
+      direction: "OUTBOUND",
+      role: "assistant",
+      body: reply,
+    });
+  } catch (memoryError) {
+    console.error("Conversation memory reply-write warning", {
+      message:
+        memoryError instanceof Error
+          ? memoryError.message
+          : String(memoryError),
+    });
+  }
 }
 
       processed += 1;

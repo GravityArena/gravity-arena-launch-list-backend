@@ -183,15 +183,41 @@ async function brevoRequest(path, options = {}) {
   return data;
 }
 
-async function addContactToBrevoList(email, listId) {
-  if (!email || !listId) return null;
+async function captureBrevoLead({ email, waId, displayName }) {
+  const config = getBrevoConfig();
+  if (!email || !config) return null;
 
-  return brevoRequest(`/contacts/lists/${listId}/contacts/add`, {
+  const { firstName, lastName } = splitDisplayName(displayName || "");
+  const { listId } = config;
+
+  const normalizedWaId = String(waId || "").replace(/\D/g, "");
+  const internationalNumber = normalizedWaId
+    ? `+${normalizedWaId}`
+    : "";
+
+  const contactResult = await brevoRequest("/contacts", {
     method: "POST",
     body: JSON.stringify({
-      emails: [email],
+      email,
+      attributes: {
+        FIRSTNAME: firstName,
+        LASTNAME: lastName,
+        ...(internationalNumber
+          ? {
+              SMS: internationalNumber,
+              WHATSAPP: internationalNumber,
+            }
+          : {}),
+      },
+      updateEnabled: true,
     }),
   });
+
+  if (listId) {
+    await addContactToBrevoList(email, listId);
+  }
+
+  return contactResult;
 }
 
 async function sendEscalationEmail({ waId, displayName, messageText, history }) {
@@ -362,26 +388,30 @@ export default async function handler(req, res) {
       }
 
       const email = extractEmail(message.text);
-      if (email) {
-        try {
-          const brevoResult = await captureBrevoLead({
-  email,
-  waId: message.from,
-  displayName: message.displayName,
-});
 
-console.log("Brevo lead captured", {
-  emailDomain: email.split("@")[1],
-  senderSuffix: message.from.slice(-4),
-  listId: getBrevoConfig()?.listId,
-  success: Boolean(brevoResult),
-});
-        } catch (brevoError) {
-          console.error("Brevo lead capture warning", {
-            message: brevoError instanceof Error ? brevoError.message : String(brevoError),
-          });
-        }
-      }
+if (email) {
+  try {
+    const brevoResult = await captureBrevoLead({
+      email,
+      waId: message.from,
+      displayName: message.displayName,
+    });
+
+    console.log("Brevo lead captured", {
+      emailDomain: email.split("@")[1],
+      senderSuffix: message.from.slice(-4),
+      listId: getBrevoConfig()?.listId || null,
+      success: Boolean(brevoResult),
+    });
+  } catch (brevoError) {
+    console.error("Brevo lead capture warning", {
+      message:
+        brevoError instanceof Error
+          ? brevoError.message
+          : String(brevoError),
+    });
+  }
+}
 
       let reply;
       let handover = false;

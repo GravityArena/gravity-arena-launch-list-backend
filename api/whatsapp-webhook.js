@@ -204,23 +204,46 @@ async function captureBrevoLead({ email, waId, displayName }) {
     ? `+${normalizedWaId}`
     : "";
 
-  const contactResult = await brevoRequest("/contacts", {
-    method: "POST",
-    body: JSON.stringify({
-      email,
-      attributes: {
-        FIRSTNAME: firstName,
-        LASTNAME: lastName,
-        ...(internationalNumber
-          ? {
-              SMS: internationalNumber,
-              WHATSAPP: internationalNumber,
-            }
-          : {}),
-      },
-      updateEnabled: true,
-    }),
-  });
+ const attributes = {
+  FIRSTNAME: firstName,
+  LASTNAME: lastName,
+};
+
+  let contactResult;
+
+  try {
+    contactResult = await brevoRequest("/contacts", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        attributes,
+        updateEnabled: true,
+      }),
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+
+    const isContactConflict =
+      message.includes("(400)") ||
+      message.toLowerCase().includes("already") ||
+      message.toLowerCase().includes("duplicate");
+
+    if (!isContactConflict) {
+      throw error;
+    }
+
+    contactResult = await brevoRequest(
+      `/contacts/${encodeURIComponent(email)}?identifierType=email_id`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          attributes,
+          ...(listId ? { listIds: [listId] } : {}),
+        }),
+      }
+    );
+  }
 
   if (listId) {
     await addContactToBrevoList(email, listId);

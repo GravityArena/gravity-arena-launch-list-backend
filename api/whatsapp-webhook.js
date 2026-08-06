@@ -224,7 +224,6 @@ const internationalNumber = normalizedWaId
 const attributes = {
   FIRSTNAME: firstName,
   LASTNAME: lastName,
-  ...(internationalNumber ? { SMS: internationalNumber } : {}),
 };
 
   let contactResult;

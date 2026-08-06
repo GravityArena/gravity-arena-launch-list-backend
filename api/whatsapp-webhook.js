@@ -263,9 +263,26 @@ const attributes = {
   }
 
   if (listId) {
+  try {
     await addContactToBrevoList(email, listId);
-  }
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
 
+    const alreadyInList =
+      message.includes("already in list") ||
+      message.includes("contact already in list");
+
+    if (!alreadyInList) {
+      throw error;
+    }
+
+    console.log("Brevo contact already in lead list", {
+      emailDomain: email.split("@")[1],
+      listId,
+    });
+  }
+}
   return contactResult;
 }
 
@@ -513,19 +530,22 @@ try {
 
       await sendWhatsAppText(message.from, reply);
 
-      try {
-        await saveMemoryMessage({
-          waId: message.from,
-          displayName: message.displayName,
-          direction: "OUTBOUND",
-          role: "assistant",
-          body: reply,
-        });
-      } catch (memoryError) {
-        console.error("Conversation memory reply-write warning", {
-          message: memoryError instanceof Error ? memoryError.message : String(memoryError),
-        });
-      }
+try {
+  await saveMemoryMessage({
+    waId: message.from,
+    displayName: message.displayName,
+    direction: "OUTBOUND",
+    role: "assistant",
+    body: reply,
+  });
+} catch (memoryError) {
+  console.error("Conversation memory reply-write warning", {
+    message:
+      memoryError instanceof Error
+        ? memoryError.message
+        : String(memoryError),
+  });
+}
 
       processed += 1;
 

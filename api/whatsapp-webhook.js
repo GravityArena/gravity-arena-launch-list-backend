@@ -158,7 +158,23 @@ function getBrevoConfig() {
     listId: Number.isInteger(listId) && listId > 0 ? listId : null,
   };
 }
+async function getHandoverStatus(waId) {
+  return memoryRequest(
+    `/?action=handover-status&wa_id=${encodeURIComponent(waId)}`,
+    { method: "GET" }
+  );
+}
 
+async function activateHandover(waId, team = "MARKETING", reason = "QUOTATION") {
+  return memoryRequest("/?action=handover-activate", {
+    method: "POST",
+    body: JSON.stringify({
+      wa_id: waId,
+      team,
+      reason,
+    }),
+  });
+}
 async function brevoRequest(path, options = {}) {
   const config = getBrevoConfig();
   if (!config) return null;

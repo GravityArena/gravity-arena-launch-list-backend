@@ -410,7 +410,8 @@ export default async function handler(req, res) {
     let processed = 0;
 
     for (const message of messages) {
-      let history = [];
+  let history = [];
+  let handoverStatus = "AI_ACTIVE";
 
       try {
         const stored = await saveMemoryMessage({
@@ -430,6 +431,10 @@ export default async function handler(req, res) {
         }
 
         history = (await getMemoryHistory(message.from)) || [];
+        const statusResult = await getHandoverStatus(message.from);
+
+handoverStatus =
+  statusResult?.handover_status || "AI_ACTIVE";
       } catch (memoryError) {
         console.error("Conversation memory read/write warning", {
           message: memoryError instanceof Error ? memoryError.message : String(memoryError),
@@ -462,11 +467,13 @@ if (email) {
   }
 }
 
-      let reply;
-      let handover = false;
+      let reply = null;
+      let handover = handoverStatus === "HUMAN_ACTIVE";
+      let aiPaused = handover;
 
       if (requiresHumanHandover(message.text)) {
         handover = true;
+        aiPaused = true;
         reply =
           process.env.HUMAN_HANDOVER_REPLY?.trim() ||
           "I have alerted the Gravity Arena team. A team member will contact you as soon as possible. Please share your name, email address and preferred contact time if you have not already done so.";
@@ -496,9 +503,13 @@ try {
             message: brevoError instanceof Error ? brevoError.message : String(brevoError),
           });
         }
-      } else {
-        reply = await askHermes(message.text, history);
-      }
+      } else if (handoverStatus === "HUMAN_ACTIVE") {
+  console.log("Hermes paused for active human handover", {
+    senderSuffix: message.from.slice(-4),
+  });
+} else {
+  reply = await askHermes(message.text, history);
+}
 
       await sendWhatsAppText(message.from, reply);
 
@@ -519,6 +530,9 @@ try {
       processed += 1;
 
       console.log("WhatsApp enquiry processed", {
+        handoverStatus,
+        aiPaused,
+        replySent: Boolean(reply),
         messageId: message.messageId,
         senderSuffix: message.from?.slice(-4),
         historyMessages: history.length,

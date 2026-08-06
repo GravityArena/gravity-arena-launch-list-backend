@@ -216,13 +216,15 @@ async function captureBrevoLead({ email, waId, displayName }) {
   const { listId } = config;
 
   const normalizedWaId = String(waId || "").replace(/\D/g, "");
-  const internationalNumber = normalizedWaId
-    ? `+${normalizedWaId}`
-    : "";
 
- const attributes = {
+const internationalNumber = normalizedWaId
+  ? `+${normalizedWaId}`
+  : "";
+
+const attributes = {
   FIRSTNAME: firstName,
   LASTNAME: lastName,
+  ...(internationalNumber ? { SMS: internationalNumber } : {}),
 };
 
   let contactResult;

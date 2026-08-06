@@ -470,7 +470,20 @@ if (email) {
         reply =
           process.env.HUMAN_HANDOVER_REPLY?.trim() ||
           "I have alerted the Gravity Arena team. A team member will contact you as soon as possible. Please share your name, email address and preferred contact time if you have not already done so.";
-
+try {
+  await activateHandover(
+    message.from,
+    "MARKETING",
+    "HUMAN_REQUEST"
+  );
+} catch (memoryError) {
+  console.error("Human handover activation warning", {
+    message:
+      memoryError instanceof Error
+        ? memoryError.message
+        : String(memoryError),
+  });
+}
         try {
           await sendEscalationEmail({
             waId: message.from,

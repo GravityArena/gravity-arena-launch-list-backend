@@ -182,7 +182,16 @@ async function brevoRequest(path, options = {}) {
   }
   return data;
 }
+async function addContactToBrevoList(email, listId) {
+  if (!email || !listId) return null;
 
+  return brevoRequest(`/contacts/lists/${listId}/contacts/add`, {
+    method: "POST",
+    body: JSON.stringify({
+      emails: [email],
+    }),
+  });
+}
 async function captureBrevoLead({ email, waId, displayName }) {
   const config = getBrevoConfig();
   if (!email || !config) return null;

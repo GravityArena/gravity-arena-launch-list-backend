@@ -1,20 +1,23 @@
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 const MEMORY_HISTORY_LIMIT = 12;
+
 const DEFAULT_HANDOVER_KEYWORDS = [
-  "human",
-  "agent",
-  "person",
-  "someone",
-  "call me",
-  "phone me",
-  "complaint",
-  "manager",
-  "refund",
-  "quotation",
-  "quote",
-  "urgent",
-  "escalate",
-  "speak to",
+  "human", "agent", "person", "someone", "call me", "phone me",
+  "complaint", "manager", "refund", "quotation", "quote", "urgent",
+  "escalate", "speak to",
+];
+
+const ACTIVITY_ALIASES = [
+  { code: "FPV_RACING", terms: ["fpv", "fpv racing", "drone racing"] },
+  { code: "VR_RACING", terms: ["vr racing", "virtual reality racing"] },
+  { code: "VR_ESCAPE", terms: ["vr escape", "escape room"] },
+  { code: "DRONE_TRAINING", terms: ["drone training", "drone lesson", "learn drone"] },
+  { code: "DRONE_PHOTOGRAPHY", terms: ["drone photography", "photography"] },
+  { code: "DRONE_REPAIR", terms: ["drone repair", "repair workshop"] },
+  { code: "SIMULATOR", terms: ["simulator", "flight simulator"] },
+  { code: "CORPORATE_EVENT", terms: ["corporate", "team building"] },
+  { code: "BIRTHDAY_PARTY", terms: ["birthday", "birthday party"] },
+  { code: "STEM_PROGRAM", terms: ["stem", "school workshop", "stem workshop"] },
 ];
 
 function parseBody(req) {
@@ -26,7 +29,6 @@ function parseBody(req) {
 
 function getIncomingMessages(payload) {
   const messages = [];
-
   for (const entry of payload.entry || []) {
     for (const change of entry.changes || []) {
       const value = change.value || {};
@@ -36,7 +38,6 @@ function getIncomingMessages(payload) {
           contact.profile?.name || "",
         ])
       );
-
       for (const message of value.messages || []) {
         if (message.type === "text" && message.text?.body) {
           messages.push({
@@ -49,7 +50,6 @@ function getIncomingMessages(payload) {
       }
     }
   }
-
   return messages;
 }
 
@@ -62,7 +62,6 @@ function getMemoryConfig() {
 async function memoryRequest(path, options = {}) {
   const config = getMemoryConfig();
   if (!config) return null;
-
   const response = await fetch(`${config.baseUrl}${path}`, {
     ...options,
     headers: {
@@ -72,24 +71,14 @@ async function memoryRequest(path, options = {}) {
     },
     signal: AbortSignal.timeout(5000),
   });
-
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(
-      `Memory API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`
-    );
+    throw new Error(`Memory API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
   }
   return data;
 }
 
-async function saveMemoryMessage({
-  waId,
-  displayName = "",
-  metaMessageId = "",
-  direction,
-  role,
-  body,
-}) {
+async function saveMemoryMessage({ waId, displayName = "", metaMessageId = "", direction, role, body }) {
   return memoryRequest("/?action=message", {
     method: "POST",
     body: JSON.stringify({
@@ -108,20 +97,49 @@ async function getMemoryHistory(waId) {
     `/?action=history&wa_id=${encodeURIComponent(waId)}&limit=${MEMORY_HISTORY_LIMIT}`,
     { method: "GET" }
   );
-
   return Array.isArray(result?.messages)
     ? result.messages
-        .filter(
-          (message) =>
-            ["user", "assistant"].includes(message.role) &&
-            typeof message.body === "string" &&
-            message.body.trim()
-        )
-        .map((message) => ({
-          role: message.role,
-          content: message.body.trim(),
-        }))
+        .filter((message) => ["user", "assistant"].includes(message.role) && typeof message.body === "string" && message.body.trim())
+        .map((message) => ({ role: message.role, content: message.body.trim() }))
     : [];
+}
+
+async function getHandoverStatus(waId) {
+  return memoryRequest(`/?action=handover-status&wa_id=${encodeURIComponent(waId)}`, { method: "GET" });
+}
+
+async function activateHandover(waId, team = "MARKETING", reason = "HUMAN_REQUEST") {
+  return memoryRequest("/?action=handover-activate", {
+    method: "POST",
+    body: JSON.stringify({ wa_id: waId, team, reason }),
+  });
+}
+
+function getBrevoConfig() {
+  const apiKey = process.env.BREVO_API_KEY?.trim();
+  if (!apiKey) return null;
+  const listId = Number(process.env.BREVO_LEAD_LIST_ID || 0);
+  return { apiKey, listId: Number.isInteger(listId) && listId > 0 ? listId : null };
+}
+
+async function brevoRequest(path, options = {}) {
+  const config = getBrevoConfig();
+  if (!config) return null;
+  const response = await fetch(`https://api.brevo.com/v3${path}`, {
+    ...options,
+    headers: {
+      "api-key": config.apiKey,
+      accept: "application/json",
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Brevo API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
+  }
+  return data;
 }
 
 function extractEmail(text) {
@@ -130,10 +148,40 @@ function extractEmail(text) {
 
 function splitDisplayName(displayName) {
   const parts = displayName.trim().split(/\s+/).filter(Boolean);
-  return {
-    firstName: parts[0] || "",
-    lastName: parts.slice(1).join(" "),
-  };
+  return { firstName: parts[0] || "", lastName: parts.slice(1).join(" ") };
+}
+
+async function captureBrevoLead({ email, displayName }) {
+  const config = getBrevoConfig();
+  if (!email || !config) return null;
+  const { firstName, lastName } = splitDisplayName(displayName || "");
+  const attributes = { FIRSTNAME: firstName, LASTNAME: lastName };
+  let result;
+  try {
+    result = await brevoRequest("/contacts", {
+      method: "POST",
+      body: JSON.stringify({ email, attributes, updateEnabled: true }),
+    });
+  } catch (error) {
+    const text = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    if (!text.includes("400") && !text.includes("already") && !text.includes("duplicate")) throw error;
+    result = await brevoRequest(`/contacts/${encodeURIComponent(email)}?identifierType=email_id`, {
+      method: "PUT",
+      body: JSON.stringify({ attributes, ...(config.listId ? { listIds: [config.listId] } : {}) }),
+    });
+  }
+  if (config.listId) {
+    try {
+      await brevoRequest(`/contacts/lists/${config.listId}/contacts/add`, {
+        method: "POST",
+        body: JSON.stringify({ emails: [email] }),
+      });
+    } catch (error) {
+      const text = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (!text.includes("already in list") && !text.includes("contact already in list")) throw error;
+    }
+  }
+  return result;
 }
 
 function getHandoverKeywords() {
@@ -148,155 +196,12 @@ function requiresHumanHandover(text) {
   return getHandoverKeywords().some((keyword) => normalized.includes(keyword));
 }
 
-function getBrevoConfig() {
-  const apiKey = process.env.BREVO_API_KEY?.trim();
-  if (!apiKey) return null;
-
-  const listId = Number(process.env.BREVO_LEAD_LIST_ID || 0);
-  return {
-    apiKey,
-    listId: Number.isInteger(listId) && listId > 0 ? listId : null,
-  };
-}
-async function getHandoverStatus(waId) {
-  return memoryRequest(
-    `/?action=handover-status&wa_id=${encodeURIComponent(waId)}`,
-    { method: "GET" }
-  );
-}
-
-async function activateHandover(waId, team = "MARKETING", reason = "QUOTATION") {
-  return memoryRequest("/?action=handover-activate", {
-    method: "POST",
-    body: JSON.stringify({
-      wa_id: waId,
-      team,
-      reason,
-    }),
-  });
-}
-async function brevoRequest(path, options = {}) {
-  const config = getBrevoConfig();
-  if (!config) return null;
-
-  const response = await fetch(`https://api.brevo.com/v3${path}`, {
-    ...options,
-    headers: {
-      "api-key": config.apiKey,
-      accept: "application/json",
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    signal: AbortSignal.timeout(8000),
-  });
-
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(
-      `Brevo API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`
-    );
-  }
-  return data;
-}
-async function addContactToBrevoList(email, listId) {
-  if (!email || !listId) return null;
-
-  return brevoRequest(`/contacts/lists/${listId}/contacts/add`, {
-    method: "POST",
-    body: JSON.stringify({
-      emails: [email],
-    }),
-  });
-}
-async function captureBrevoLead({ email, waId, displayName }) {
-  const config = getBrevoConfig();
-  if (!email || !config) return null;
-
-  const { firstName, lastName } = splitDisplayName(displayName || "");
-  const { listId } = config;
-
-  const normalizedWaId = String(waId || "").replace(/\D/g, "");
-
-const internationalNumber = normalizedWaId
-  ? `+${normalizedWaId}`
-  : "";
-
-const attributes = {
-  FIRSTNAME: firstName,
-  LASTNAME: lastName,
-};
-
-  let contactResult;
-
-  try {
-    contactResult = await brevoRequest("/contacts", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        attributes,
-        updateEnabled: true,
-      }),
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : String(error);
-
-    const isContactConflict =
-      message.includes("(400)") ||
-      message.toLowerCase().includes("already") ||
-      message.toLowerCase().includes("duplicate");
-
-    if (!isContactConflict) {
-      throw error;
-    }
-
-    contactResult = await brevoRequest(
-      `/contacts/${encodeURIComponent(email)}?identifierType=email_id`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          attributes,
-          ...(listId ? { listIds: [listId] } : {}),
-        }),
-      }
-    );
-  }
-
-  if (listId) {
-  try {
-    await addContactToBrevoList(email, listId);
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-
-    const alreadyInList =
-      message.includes("already in list") ||
-      message.includes("contact already in list");
-
-    if (!alreadyInList) {
-      throw error;
-    }
-
-    console.log("Brevo contact already in lead list", {
-      emailDomain: email.split("@")[1],
-      listId,
-    });
-  }
-}
-  return contactResult;
-}
-
 async function sendEscalationEmail({ waId, displayName, messageText, history }) {
   const recipient = process.env.HUMAN_ESCALATION_EMAIL?.trim();
   const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
   const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena Hermes";
   if (!recipient || !senderEmail || !getBrevoConfig()) return null;
-
-  const transcript = history
-    .slice(-8)
-    .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
-    .join("\n");
-
+  const transcript = history.slice(-8).map((item) => `${item.role.toUpperCase()}: ${item.content}`).join("\n");
   return brevoRequest("/smtp/email", {
     method: "POST",
     body: JSON.stringify({
@@ -309,82 +214,220 @@ async function sendEscalationEmail({ waId, displayName, messageText, history }) 
         `WhatsApp: ${waId}`,
         `Latest message: ${messageText}`,
         "",
-        "Recent conversation:",
-        transcript || "No prior messages available.",
+        "Recent conversation:", transcript || "No prior messages available.",
       ].join("\n"),
       tags: ["gravity-arena", "whatsapp-handover"],
     }),
   });
 }
 
+function getBookingConfig() {
+  const baseUrl = process.env.BOOKING_API_URL?.trim()?.replace(/\/$/, "");
+  const apiKey = process.env.BOOKING_API_KEY?.trim();
+  return baseUrl && apiKey ? { baseUrl, apiKey } : null;
+}
+
+async function bookingRequest(path, options = {}) {
+  const config = getBookingConfig();
+  if (!config) throw new Error("Booking API configuration is incomplete.");
+  const response = await fetch(`${config.baseUrl}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`Booking API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
+  }
+  return data;
+}
+
+function detectActivityCode(text) {
+  const normalized = text.toLowerCase();
+  return ACTIVITY_ALIASES.find((activity) => activity.terms.some((term) => normalized.includes(term)))?.code || null;
+}
+
+function johannesburgDate(offsetDays = 0) {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Africa/Johannesburg", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(now.getTime() + offsetDays * 86400000));
+  const get = (type) => parts.find((part) => part.type === type)?.value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function detectBookingDate(text) {
+  const iso = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1];
+  if (iso) return iso;
+  const normalized = text.toLowerCase();
+  if (normalized.includes("tomorrow")) return johannesburgDate(1);
+  if (normalized.includes("today")) return johannesburgDate(0);
+  return null;
+}
+
+function detectGuestCount(text) {
+  const patterns = [/(\d{1,2})\s*(?:people|guests|persons|players)/i, /\bfor\s+(\d{1,2})\b/i];
+  for (const pattern of patterns) {
+    const value = Number(text.match(pattern)?.[1] || 0);
+    if (value > 0 && value <= 100) return value;
+  }
+  return null;
+}
+
+function detectSlotId(text) {
+  const value = Number(text.match(/\bslot\s*#?\s*(\d+)\b/i)?.[1] || 0);
+  return value > 0 ? value : null;
+}
+
+function isBookingIntent(text) {
+  return /\b(book|booking|available|availability|reserve|slot)\b/i.test(text);
+}
+
+function isExplicitBookingConfirmation(text) {
+  return /\b(confirm|confirmed|yes book|book it|reserve it|go ahead)\b/i.test(text);
+}
+
+function formatSlots(slots) {
+  if (!slots.length) return "I could not find an available slot matching that request.";
+  return [
+    "These slots are currently available:",
+    ...slots.slice(0, 8).map((slot) => `• Slot ${slot.slot_id}: ${slot.starts_at} — ${slot.remaining_capacity} spaces remaining`),
+    "",
+    "To book, reply with: Confirm slot <number> for <guest count> people and include your email address.",
+  ].join("\n");
+}
+
+async function sendBookingConfirmationEmail(booking) {
+  const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
+  const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena";
+  if (!booking?.customer_email || !senderEmail || !getBrevoConfig()) return null;
+  return brevoRequest("/smtp/email", {
+    method: "POST",
+    body: JSON.stringify({
+      sender: { email: senderEmail, name: senderName },
+      to: [{ email: booking.customer_email, name: booking.customer_name || "Gravity Arena Customer" }],
+      subject: `Gravity Arena booking confirmed: ${booking.booking_reference}`,
+      textContent: [
+        `Hi ${booking.customer_name || "there"},`, "",
+        "Your Gravity Arena booking is confirmed.",
+        `Reference: ${booking.booking_reference}`,
+        `Activity: ${booking.activity_name}`,
+        `Date and time: ${booking.starts_at}`,
+        `Guests: ${booking.guest_count}`,
+        "", "Reply to our WhatsApp conversation if you need assistance.",
+      ].join("\n"),
+      tags: ["gravity-arena", "booking-confirmation"],
+    }),
+  });
+}
+
+async function handleBookingMessage(message) {
+  if (!getBookingConfig() || !isBookingIntent(message.text)) return null;
+
+  const activityCode = detectActivityCode(message.text);
+  const date = detectBookingDate(message.text);
+  const guestCount = detectGuestCount(message.text);
+  const slotId = detectSlotId(message.text);
+  const email = extractEmail(message.text);
+
+  if (isExplicitBookingConfirmation(message.text) && slotId) {
+    if (!guestCount) return "Before I reserve that slot, please tell me how many guests will attend.";
+    if (!email) return "Before I reserve that slot, please send the email address for the booking confirmation.";
+
+    const held = await bookingRequest("/?action=booking-create", {
+      method: "POST",
+      body: JSON.stringify({
+        wa_id: message.from,
+        slot_id: slotId,
+        guest_count: guestCount,
+        customer_name: message.displayName || "",
+        customer_email: email,
+        notes: "Created through Gravity Arena Hermes WhatsApp booking skill",
+      }),
+    });
+
+    const confirmed = await bookingRequest("/?action=booking-confirm", {
+      method: "POST",
+      body: JSON.stringify({ booking_reference: held.booking_reference }),
+    });
+
+    const booking = confirmed.booking || {};
+    try {
+      await sendBookingConfirmationEmail(booking);
+    } catch (error) {
+      console.error("Booking confirmation email warning", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return [
+      "✅ Your Gravity Arena booking is confirmed.",
+      `Reference: ${booking.booking_reference || held.booking_reference}`,
+      `Activity: ${booking.activity_name || held.activity_name}`,
+      `Date and time: ${booking.starts_at || held.starts_at}`,
+      `Guests: ${booking.guest_count || held.guest_count}`,
+      "",
+      "I’ve also sent the booking confirmation to your email address.",
+    ].join("\n");
+  }
+
+  if (!activityCode) return "Which Gravity Arena activity would you like to book?";
+  if (!date) return "What date would you prefer? You can say today, tomorrow, or use YYYY-MM-DD.";
+  if (!guestCount) return "How many guests should I check availability for?";
+
+  const params = new URLSearchParams({
+    action: "availability",
+    activity_code: activityCode,
+    date,
+    guest_count: String(guestCount),
+  });
+  const availability = await bookingRequest(`/?${params.toString()}`, { method: "GET" });
+  return formatSlots(Array.isArray(availability?.slots) ? availability.slots : []);
+}
+
 async function askHermes(userText, history = []) {
   const apiUrl = process.env.HERMES_API_URL?.trim();
   const apiKey = process.env.HERMES_API_KEY?.trim();
   const model = process.env.HERMES_MODEL?.trim();
-
   if (!apiUrl || !model) {
     return "Thanks for contacting Gravity Arena. Your message has been received and a team member will assist you shortly.";
   }
-
-  const systemPrompt =
-    process.env.HERMES_SYSTEM_PROMPT ||
-    "You are Gravity Arena's customer assistant. Be concise, professional and friendly. Use the supplied conversation history to understand follow-up questions. Never invent prices, availability, policies or dates. When information is missing, collect the customer's name, email, activity of interest, preferred date and number of guests, then say a team member will confirm. Do not expose internal information.";
-
-  const conversationMessages = history.length
-    ? history
-    : [{ role: "user", content: userText }];
-
+  const systemPrompt = process.env.HERMES_SYSTEM_PROMPT ||
+    "You are Gravity Arena's customer assistant. Be concise, professional and friendly. Use conversation history. Never invent prices, availability, policies or dates. Booking availability and confirmed bookings are handled by the Gravity Arena booking engine. Do not claim a booking is confirmed unless the booking engine supplied a booking reference. Do not expose internal information.";
+  const conversationMessages = history.length ? history : [{ role: "user", content: userText }];
   const response = await fetch(apiUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
+    headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
     body: JSON.stringify({
       model,
       messages: [{ role: "system", content: systemPrompt }, ...conversationMessages],
       max_completion_tokens: 350,
     }),
   });
-
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`Hermes API failed (${response.status}): ${detail.slice(0, 500)}`);
   }
-
   const data = await response.json();
-  return (
-    data.choices?.[0]?.message?.content?.trim() ||
-    "Thanks for contacting Gravity Arena. A team member will assist you shortly."
-  );
+  return data.choices?.[0]?.message?.content?.trim() || "Thanks for contacting Gravity Arena. A team member will assist you shortly.";
 }
 
 async function sendWhatsAppText(to, text) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN?.trim();
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID?.trim();
-
-  if (!token || !phoneNumberId) {
-    throw new Error("WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required.");
-  }
-
-  const response = await fetch(
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/${phoneNumberId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: { preview_url: false, body: text.slice(0, 4096) },
-      }),
-    }
-  );
-
+  if (!token || !phoneNumberId) throw new Error("WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID are required.");
+  const response = await fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp", recipient_type: "individual", to, type: "text",
+      text: { preview_url: false, body: text.slice(0, 4096) },
+    }),
+  });
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(`WhatsApp send failed (${response.status}): ${detail.slice(0, 500)}`);
@@ -399,36 +442,27 @@ export default async function handler(req, res) {
     const mode = req.query?.["hub.mode"];
     const token = req.query?.["hub.verify_token"];
     const challenge = req.query?.["hub.challenge"];
-
-    if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
-    }
+    if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) return res.status(200).send(challenge);
     return res.status(403).json({ ok: false, error: "Webhook verification failed." });
   }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed." });
-  }
+  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed." });
 
   try {
     const payload = parseBody(req);
     const messages = getIncomingMessages(payload);
-
     console.log("WhatsApp webhook received", {
       object: payload.object,
       messageCount: messages.length,
-      fields: (payload.entry || []).flatMap((entry) =>
-        (entry.changes || []).map((change) => change.field)
-      ),
+      fields: (payload.entry || []).flatMap((entry) => (entry.changes || []).map((change) => change.field)),
       memoryEnabled: Boolean(getMemoryConfig()),
       brevoEnabled: Boolean(getBrevoConfig()),
+      bookingEnabled: Boolean(getBookingConfig()),
     });
 
     let processed = 0;
-
     for (const message of messages) {
-  let history = [];
-  let handoverStatus = "AI_ACTIVE";
+      let history = [];
+      let handoverStatus = "AI_ACTIVE";
 
       try {
         const stored = await saveMemoryMessage({
@@ -439,19 +473,13 @@ export default async function handler(req, res) {
           role: "user",
           body: message.text,
         });
-
         if (stored?.duplicate) {
-          console.log("Duplicate WhatsApp message ignored", {
-            messageId: message.messageId,
-          });
+          console.log("Duplicate WhatsApp message ignored", { messageId: message.messageId });
           continue;
         }
-
         history = (await getMemoryHistory(message.from)) || [];
         const statusResult = await getHandoverStatus(message.from);
-
-handoverStatus =
-  statusResult?.handover_status || "AI_ACTIVE";
+        handoverStatus = statusResult?.handover_status || "AI_ACTIVE";
       } catch (memoryError) {
         console.error("Conversation memory read/write warning", {
           message: memoryError instanceof Error ? memoryError.message : String(memoryError),
@@ -459,122 +487,83 @@ handoverStatus =
       }
 
       const email = extractEmail(message.text);
-
-if (email) {
-  try {
-    const brevoResult = await captureBrevoLead({
-      email,
-      waId: message.from,
-      displayName: message.displayName,
-    });
-
-    console.log("Brevo lead captured", {
-      emailDomain: email.split("@")[1],
-      senderSuffix: message.from.slice(-4),
-      listId: getBrevoConfig()?.listId || null,
-      success: Boolean(brevoResult),
-    });
-  } catch (brevoError) {
-    console.error("Brevo lead capture warning", {
-      message:
-        brevoError instanceof Error
-          ? brevoError.message
-          : String(brevoError),
-    });
-  }
-}
+      if (email) {
+        try {
+          await captureBrevoLead({ email, displayName: message.displayName });
+          console.log("Brevo lead captured", {
+            emailDomain: email.split("@")[1], senderSuffix: message.from.slice(-4),
+            listId: getBrevoConfig()?.listId || null,
+          });
+        } catch (brevoError) {
+          console.error("Brevo lead capture warning", {
+            message: brevoError instanceof Error ? brevoError.message : String(brevoError),
+          });
+        }
+      }
 
       let reply = null;
       let handover = handoverStatus === "HUMAN_ACTIVE";
       let aiPaused = handover;
+      let bookingHandled = false;
 
       if (requiresHumanHandover(message.text)) {
         handover = true;
         aiPaused = true;
-        reply =
-          process.env.HUMAN_HANDOVER_REPLY?.trim() ||
+        reply = process.env.HUMAN_HANDOVER_REPLY?.trim() ||
           "I have alerted the Gravity Arena team. A team member will contact you as soon as possible. Please share your name, email address and preferred contact time if you have not already done so.";
-try {
-  await activateHandover(
-    message.from,
-    "MARKETING",
-    "HUMAN_REQUEST"
-  );
-} catch (memoryError) {
-  console.error("Human handover activation warning", {
-    message:
-      memoryError instanceof Error
-        ? memoryError.message
-        : String(memoryError),
-  });
-}
+        try { await activateHandover(message.from); } catch (error) {
+          console.error("Human handover activation warning", { message: error instanceof Error ? error.message : String(error) });
+        }
         try {
-          await sendEscalationEmail({
-            waId: message.from,
-            displayName: message.displayName,
-            messageText: message.text,
-            history,
-          });
-        } catch (brevoError) {
-          console.error("Human escalation notification warning", {
-            message: brevoError instanceof Error ? brevoError.message : String(brevoError),
-          });
+          await sendEscalationEmail({ waId: message.from, displayName: message.displayName, messageText: message.text, history });
+        } catch (error) {
+          console.error("Human escalation notification warning", { message: error instanceof Error ? error.message : String(error) });
         }
       } else if (handoverStatus === "HUMAN_ACTIVE") {
-  aiPaused = true;
-  handover = true;
+        aiPaused = true;
+        handover = true;
+        reply = process.env.HUMAN_HANDOVER_WAITING_REPLY?.trim() ||
+          "Your conversation is still with the Gravity Arena team. A team member has been notified and will respond as soon as possible. You can continue sending any additional details here.";
+        console.log("Hermes paused for active human handover", { senderSuffix: message.from.slice(-4), statusReplySent: true });
+      } else {
+        try {
+          reply = await handleBookingMessage(message);
+          bookingHandled = Boolean(reply);
+        } catch (bookingError) {
+          console.error("Booking skill warning", {
+            message: bookingError instanceof Error ? bookingError.message : String(bookingError),
+          });
+          reply = "I’m having trouble checking the booking system right now. I can still help with general questions, or I can connect you with the Gravity Arena team.";
+          bookingHandled = true;
+        }
+        if (!reply) reply = await askHermes(message.text, history);
+      }
 
-  reply =
-    process.env.HUMAN_HANDOVER_WAITING_REPLY?.trim() ||
-    "Your conversation is still with the Gravity Arena team. A team member has been notified and will respond as soon as possible. You can continue sending any additional details here.";
-
-  console.log("Hermes paused for active human handover", {
-    senderSuffix: message.from.slice(-4),
-    statusReplySent: true,
-  });
-} else {
-  reply = await askHermes(message.text, history);
-}
-if (reply) {
-  await sendWhatsAppText(message.from, reply);
-
-  try {
-    await saveMemoryMessage({
-      waId: message.from,
-      displayName: message.displayName,
-      direction: "OUTBOUND",
-      role: "assistant",
-      body: reply,
-    });
-  } catch (memoryError) {
-    console.error("Conversation memory reply-write warning", {
-      message:
-        memoryError instanceof Error
-          ? memoryError.message
-          : String(memoryError),
-    });
-  }
-}
+      if (reply) {
+        await sendWhatsAppText(message.from, reply);
+        try {
+          await saveMemoryMessage({
+            waId: message.from, displayName: message.displayName,
+            direction: "OUTBOUND", role: "assistant", body: reply,
+          });
+        } catch (memoryError) {
+          console.error("Conversation memory reply-write warning", {
+            message: memoryError instanceof Error ? memoryError.message : String(memoryError),
+          });
+        }
+      }
 
       processed += 1;
-
       console.log("WhatsApp enquiry processed", {
-        handoverStatus,
-        aiPaused,
-        replySent: Boolean(reply),
-        messageId: message.messageId,
-        senderSuffix: message.from?.slice(-4),
-        historyMessages: history.length,
-        leadCaptured: Boolean(email),
-        handover,
+        handoverStatus, aiPaused, replySent: Boolean(reply), bookingHandled,
+        messageId: message.messageId, senderSuffix: message.from?.slice(-4),
+        historyMessages: history.length, leadCaptured: Boolean(email), handover,
       });
     }
 
     return res.status(200).json({ ok: true, processed });
   } catch (error) {
-    console.error("WhatsApp gateway error", {
-      message: error instanceof Error ? error.message : String(error),
-    });
+    console.error("WhatsApp gateway error", { message: error instanceof Error ? error.message : String(error) });
     return res.status(200).json({ ok: false, processed: 0 });
   }
 }

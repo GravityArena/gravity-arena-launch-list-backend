@@ -1,7 +1,9 @@
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 
 function isAuthorized(req) {
-  const expected = process.env.BOOKING_REMINDER_CRON_KEY?.trim();
+  const expected =
+    process.env.BOOKING_REMINDER_CRON_KEY?.trim() ||
+    process.env.CRON_SECRET?.trim();
   const suppliedHeader = String(req.headers["x-api-key"] || "").trim();
   const auth = String(req.headers.authorization || "").trim();
   const suppliedBearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";

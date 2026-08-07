@@ -9,6 +9,8 @@ require_once __DIR__ . '/lib/utils.php';
 require_once __DIR__ . '/lib/auth.php';
 require_once __DIR__ . '/lib/activities.php';
 require_once __DIR__ . '/lib/bookings.php';
+require_once __DIR__ . '/lib/booking-confirmation.php';
+require_once __DIR__ . '/lib/reminders.php';
 
 $configPath = __DIR__ . '/config.php';
 if (!is_file($configPath)) {
@@ -65,11 +67,23 @@ if ($method === 'GET' && $action === 'availability') {
 if ($method === 'POST' && $action === 'booking-create') {
     createBooking($pdo, $config);
 }
+if ($method === 'POST' && $action === 'booking-confirm') {
+    confirmBooking($pdo);
+}
 if ($method === 'GET' && $action === 'booking-status') {
     getBookingStatus($pdo);
 }
 if ($method === 'POST' && $action === 'booking-cancel') {
     cancelBooking($pdo);
+}
+if ($method === 'GET' && $action === 'reminders-due') {
+    listDueReminders($pdo);
+}
+if ($method === 'POST' && $action === 'reminder-sent') {
+    markReminderSent($pdo);
+}
+if ($method === 'POST' && $action === 'reminder-failed') {
+    markReminderFailed($pdo);
 }
 
 respond(404, ['ok' => false, 'error' => 'Endpoint not found.']);

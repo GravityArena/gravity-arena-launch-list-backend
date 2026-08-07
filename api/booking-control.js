@@ -17,22 +17,19 @@ function getBookingConfig() {
   return baseUrl && apiKey ? { baseUrl, apiKey } : null;
 }
 
-async function bookingRequest(action, options = {}) {
+async function bookingRequest(path, options = {}) {
   const config = getBookingConfig();
   if (!config) throw new Error("Booking API configuration is incomplete.");
 
-  const response = await fetch(
-    `${config.baseUrl}/?action=${encodeURIComponent(action)}`,
-    {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
-      signal: AbortSignal.timeout(8000),
-    }
-  );
+  const response = await fetch(`${config.baseUrl}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    signal: AbortSignal.timeout(8000),
+  });
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -66,10 +63,38 @@ export default async function handler(req, res) {
       });
     }
 
-    const result = await bookingRequest(operation, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    let result;
+
+    if (operation === "availability") {
+      const params = new URLSearchParams();
+      params.set("action", "availability");
+      params.set("activity_code", String(body.activity_code || ""));
+      if (body.date) params.set("date", String(body.date));
+      if (body.guest_count) params.set("guest_count", String(body.guest_count));
+      result = await bookingRequest(`/?${params.toString()}`, { method: "GET" });
+    }
+
+    if (operation === "create") {
+      result = await bookingRequest("/?action=booking-create", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    }
+
+    if (operation === "status") {
+      const params = new URLSearchParams({
+        action: "booking-status",
+        booking_reference: String(body.booking_reference || ""),
+      });
+      result = await bookingRequest(`/?${params.toString()}`, { method: "GET" });
+    }
+
+    if (operation === "cancel") {
+      result = await bookingRequest("/?action=booking-cancel", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    }
 
     return res.status(200).json(result);
   } catch (error) {

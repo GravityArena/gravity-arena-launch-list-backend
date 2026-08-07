@@ -1,5 +1,12 @@
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 
+console.log({
+  hasCronSecret: Boolean(process.env.CRON_SECRET),
+  cronLength: process.env.CRON_SECRET?.length ?? 0,
+  hasBookingApiUrl: Boolean(process.env.BOOKING_API_URL),
+  hasBookingApiKey: Boolean(process.env.BOOKING_API_KEY),
+});
+
 function isAuthorized(req) {
   const expected =
     process.env.BOOKING_REMINDER_CRON_KEY?.trim() ||

@@ -40,6 +40,54 @@ async function bookingRequest(path, options = {}) {
   return data;
 }
 
+async function sendBrevoBookingConfirmation(booking) {
+  const apiKey = process.env.BREVO_API_KEY?.trim();
+  const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
+  const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena";
+  const email = booking?.customer_email?.trim();
+
+  if (!apiKey || !senderEmail || !email) return { skipped: true };
+
+  const startsAt = String(booking.starts_at || "");
+  const body = [
+    `Hi ${booking.customer_name || "there"},`,
+    "",
+    "Your Gravity Arena booking is confirmed.",
+    `Booking reference: ${booking.booking_reference}`,
+    `Activity: ${booking.activity_name}`,
+    `Date and time: ${startsAt}`,
+    `Guests: ${booking.guest_count}`,
+    "",
+    "Please keep your booking reference for any changes or support requests.",
+    "",
+    "Gravity Arena",
+  ].join("\n");
+
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": apiKey,
+      accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { email: senderEmail, name: senderName },
+      to: [{ email, name: booking.customer_name || "Gravity Arena Customer" }],
+      subject: `Gravity Arena booking confirmed: ${booking.booking_reference}`,
+      textContent: body,
+      tags: ["gravity-arena", "booking-confirmation"],
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Brevo confirmation failed (${response.status}): ${detail.slice(0, 500)}`);
+  }
+
+  return { sent: true };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -56,10 +104,10 @@ export default async function handler(req, res) {
     const body = parseBody(req);
     const operation = String(body.operation || "").trim().toLowerCase();
 
-    if (!["availability", "create", "status", "cancel"].includes(operation)) {
+    if (!["availability", "create", "confirm", "status", "cancel"].includes(operation)) {
       return res.status(422).json({
         ok: false,
-        error: "operation must be availability, create, status or cancel.",
+        error: "operation must be availability, create, confirm, status or cancel.",
       });
     }
 
@@ -79,6 +127,24 @@ export default async function handler(req, res) {
         method: "POST",
         body: JSON.stringify(body),
       });
+    }
+
+    if (operation === "confirm") {
+      result = await bookingRequest("/?action=booking-confirm", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+
+      let emailResult = { skipped: true };
+      try {
+        emailResult = await sendBrevoBookingConfirmation(result?.booking);
+      } catch (emailError) {
+        console.error("Booking confirmation email warning", {
+          message: emailError instanceof Error ? emailError.message : String(emailError),
+        });
+        emailResult = { sent: false };
+      }
+      result = { ...result, confirmation_email: emailResult };
     }
 
     if (operation === "status") {

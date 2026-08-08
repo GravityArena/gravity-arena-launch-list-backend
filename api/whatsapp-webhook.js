@@ -1,3 +1,4 @@
+import { handleConversationalBooking } from "./lib/booking-conversation.js";
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 const MEMORY_HISTORY_LIMIT = 12;
 
@@ -672,8 +673,20 @@ export default async function handler(req, res) {
       } else {
         try {
           const bookingManagementReply = await handleBookingManagementMessage(message);
-          reply = bookingManagementReply || await handleBookingMessage(message);
-          bookingHandled = Boolean(reply);
+          const conversationalBookingReply = bookingManagementReply
+            ? null
+            : await handleConversationalBooking(message, history);
+
+          reply =
+            bookingManagementReply ||
+            conversationalBookingReply ||
+            await handleBookingMessage(message);
+
+          bookingHandled = Boolean(
+            bookingManagementReply ||
+            conversationalBookingReply ||
+            reply
+          );
         } catch (bookingError) {
           console.error("Booking skill warning", {
             message: bookingError instanceof Error ? bookingError.message : String(bookingError),

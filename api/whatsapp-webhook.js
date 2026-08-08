@@ -62,6 +62,12 @@ function getMemoryConfig() {
 async function memoryRequest(path, options = {}) {
   const config = getMemoryConfig();
   if (!config) return null;
+
+  console.log("Memory API request", {
+    path,
+    method: options.method || "GET",
+  });
+
   const response = await fetch(`${config.baseUrl}${path}`, {
     ...options,
     headers: {

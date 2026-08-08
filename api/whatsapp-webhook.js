@@ -72,9 +72,11 @@ async function memoryRequest(path, options = {}) {
     signal: AbortSignal.timeout(5000),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(`Memory API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
-  }
+if (!response.ok) {
+  throw new Error(
+    `Memory API failed (${response.status}) on ${path}: ${JSON.stringify(data).slice(0, 500)}`
+  );
+}
   return data;
 }
 

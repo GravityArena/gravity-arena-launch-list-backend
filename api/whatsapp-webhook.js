@@ -673,29 +673,30 @@ export default async function handler(req, res) {
         console.log("Hermes paused for active human handover", { senderSuffix: message.from.slice(-4), statusReplySent: true });
       } else {
         try {
-          const bookingRescheduleReply = await handleBookingReschedule(message, history);
+          const bookingRescheduleReply =
+  await handleBookingReschedule(message, history);
 
-   const bookingManagementReply = bookingRescheduleReply
-     ? null
-     : await handleBookingManagementMessage(message);
+const bookingManagementReply = bookingRescheduleReply
+  ? null
+  : await handleBookingManagementMessage(message);
 
-   const conversationalBookingReply =
-     bookingRescheduleReply || bookingManagementReply
-       ? null
-       : await handleConversationalBooking(message, history);
+const conversationalBookingReply =
+  bookingRescheduleReply || bookingManagementReply
+    ? null
+    : await handleConversationalBooking(message, history);
 
-   reply =
-     bookingRescheduleReply ||
-     bookingManagementReply ||
-     conversationalBookingReply ||
-     await handleBookingMessage(message);
+reply =
+  bookingRescheduleReply ||
+  bookingManagementReply ||
+  conversationalBookingReply ||
+  await handleBookingMessage(message);
 
-   bookingHandled = Boolean(
-     bookingRescheduleReply ||
-     bookingManagementReply ||
-     conversationalBookingReply ||
-     reply
-   );
+bookingHandled = Boolean(
+  bookingRescheduleReply ||
+  bookingManagementReply ||
+  conversationalBookingReply ||
+  reply
+);
 
           bookingHandled = Boolean(
             bookingManagementReply ||

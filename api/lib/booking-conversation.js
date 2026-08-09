@@ -1,6 +1,7 @@
+// Gravity Arena Hermes Booking Regression Fix R1
 const ACTIVITY_ALIASES = [
   { code: "FPV_RACING", name: "FPV Drone Racing", terms: ["fpv", "fpv racing", "drone racing"] },
-  { code: "VR_RACING", name: "VR Racing", terms: ["vr racing", "virtual reality racing"] },
+  { code: "VR_RACING", name: "VR Racing", terms: ["vr racing", "virtual reality racing", "vr experience", "virtual reality experience", "vr"] },
   { code: "VR_ESCAPE", name: "VR Escape", terms: ["vr escape", "escape room"] },
   { code: "DRONE_TRAINING", name: "Drone Training", terms: ["drone training", "drone lesson", "learn drone"] },
   { code: "DRONE_PHOTOGRAPHY", name: "Drone Photography", terms: ["drone photography", "photography"] },
@@ -60,9 +61,36 @@ function activityName(code) {
 function detectBookingDate(text = "") {
   const iso = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1];
   if (iso) return iso;
+
   const normalized = text.toLowerCase();
   if (normalized.includes("tomorrow")) return johannesburgDate(1);
   if (normalized.includes("today")) return johannesburgDate(0);
+
+  const monthMap = {
+    january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3,
+    april: 4, apr: 4, may: 5, june: 6, jun: 6, july: 7, jul: 7,
+    august: 8, aug: 8, september: 9, sep: 9, sept: 9,
+    october: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12,
+  };
+
+  let m = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(20\d{2})\b/i);
+  if (m) {
+    const day = Number(m[1]), month = monthMap[m[2].toLowerCase()], year = Number(m[3]);
+    if (day >= 1 && day <= 31 && month) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  m = normalized.match(/\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(20\d{2})\b/i);
+  if (m) {
+    const month = monthMap[m[1].toLowerCase()], day = Number(m[2]), year = Number(m[3]);
+    if (day >= 1 && day <= 31 && month) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  m = normalized.match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2})\b/);
+  if (m) {
+    const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
   return null;
 }
 
@@ -80,6 +108,21 @@ function detectGuestCount(text = "") {
 
 function extractEmail(text = "") {
   return text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || null;
+}
+
+function detectCustomerName(text = "") {
+  const email = extractEmail(text);
+  if (!email) return null;
+
+  const idx = text.toLowerCase().indexOf(email.toLowerCase());
+  const beforeEmail = idx >= 0 ? text.slice(0, idx).replace(/[,:;|]+$/g, "").trim() : "";
+
+  if (/^[A-Za-z][A-Za-z' -]{1,79}$/.test(beforeEmail) && beforeEmail.split(/\s+/).length <= 6) {
+    return beforeEmail;
+  }
+
+  const named = text.match(/\b(?:my name is|name is|i am|i'm)\s+([A-Za-z][A-Za-z' -]{1,79}?)(?=\s*(?:,|;|\||and\s+my\s+email|email|$))/i)?.[1]?.trim();
+  return named || null;
 }
 
 function detectPreferredPeriod(text = "") {
@@ -165,6 +208,7 @@ function deriveContext(message, history = []) {
     date: null,
     guestCount: null,
     email: null,
+    customerName: null,
     preferredPeriod: null,
     selectedTime: null,
     slotId: null,
@@ -176,6 +220,7 @@ function deriveContext(message, history = []) {
     context.date = detectBookingDate(text) || context.date;
     context.guestCount = detectGuestCount(text) || context.guestCount;
     context.email = extractEmail(text) || context.email;
+    context.customerName = detectCustomerName(text) || context.customerName;
     context.preferredPeriod = detectPreferredPeriod(text) || context.preferredPeriod;
     context.selectedTime = detectSelectedTime(text) || context.selectedTime;
     context.slotId = detectSlotId(text) || context.slotId;
@@ -185,7 +230,7 @@ function deriveContext(message, history = []) {
 
 function currentHasBookingField(text = "") {
   return Boolean(
-    detectActivityCode(text) || detectBookingDate(text) || detectGuestCount(text) || extractEmail(text) ||
+    detectActivityCode(text) || detectBookingDate(text) || detectGuestCount(text) || extractEmail(text) || detectCustomerName(text) ||
     detectPreferredPeriod(text) || detectSelectedTime(text) || detectSlotId(text)
   );
 }
@@ -256,7 +301,7 @@ async function confirmBooking(message, context, slot) {
       wa_id: message.from,
       slot_id: Number(slot.slot_id),
       guest_count: context.guestCount,
-      customer_name: message.displayName || "",
+      customer_name: context.customerName || message.displayName || "",
       customer_email: context.email,
       notes: "Created through Gravity Arena conversational booking flow",
       idempotency_key: message.messageId || "",
@@ -301,6 +346,17 @@ export async function handleConversationalBooking(message, history = []) {
 
   const context = deriveContext(message, history);
   if (!context.active) return null;
+
+  console.log("Hermes booking context", {
+    activityCode: context.activityCode,
+    date: context.date,
+    guestCount: context.guestCount,
+    emailPresent: Boolean(context.email),
+    customerNamePresent: Boolean(context.customerName),
+    preferredPeriod: context.preferredPeriod,
+    selectedTime: context.selectedTime,
+    slotId: context.slotId,
+  });
 
   if (!context.activityCode) return "Absolutely. Which Gravity Arena activity would you like to book?";
   if (!context.guestCount) return `Great — ${activityName(context.activityCode)}. How many guests will be attending?`;

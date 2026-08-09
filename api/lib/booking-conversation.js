@@ -259,6 +259,7 @@ async function confirmBooking(message, context, slot) {
       customer_name: message.displayName || "",
       customer_email: context.email,
       notes: "Created through Gravity Arena conversational booking flow",
+      idempotency_key: message.messageId || "",
     }),
   });
   const confirmed = await bookingRequest("/?action=booking-confirm", {
@@ -266,7 +267,9 @@ async function confirmBooking(message, context, slot) {
     body: JSON.stringify({ booking_reference: held.booking_reference }),
   });
   const booking = confirmed.booking || {};
-  const emailSent = await sendConfirmationEmail(booking);
+  const emailSent = confirmed.already_confirmed
+    ? true
+    : await sendConfirmationEmail(booking);
   return [
     "✅ Your Gravity Arena booking is confirmed.",
     `Reference: ${booking.booking_reference || held.booking_reference}`,

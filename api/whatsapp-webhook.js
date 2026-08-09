@@ -1,4 +1,5 @@
 import { handleConversationalBooking } from "./lib/booking-conversation.js";
+import { handleBookingReschedule } from "./lib/booking-reschedule.js";
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v26.0";
 const MEMORY_HISTORY_LIMIT = 12;
 
@@ -672,15 +673,29 @@ export default async function handler(req, res) {
         console.log("Hermes paused for active human handover", { senderSuffix: message.from.slice(-4), statusReplySent: true });
       } else {
         try {
-          const bookingManagementReply = await handleBookingManagementMessage(message);
-          const conversationalBookingReply = bookingManagementReply
-            ? null
-            : await handleConversationalBooking(message, history);
+          const bookingRescheduleReply = await handleBookingReschedule(message, history);
 
-          reply =
-            bookingManagementReply ||
-            conversationalBookingReply ||
-            await handleBookingMessage(message);
+   const bookingManagementReply = bookingRescheduleReply
+     ? null
+     : await handleBookingManagementMessage(message);
+
+   const conversationalBookingReply =
+     bookingRescheduleReply || bookingManagementReply
+       ? null
+       : await handleConversationalBooking(message, history);
+
+   reply =
+     bookingRescheduleReply ||
+     bookingManagementReply ||
+     conversationalBookingReply ||
+     await handleBookingMessage(message);
+
+   bookingHandled = Boolean(
+     bookingRescheduleReply ||
+     bookingManagementReply ||
+     conversationalBookingReply ||
+     reply
+   );
 
           bookingHandled = Boolean(
             bookingManagementReply ||

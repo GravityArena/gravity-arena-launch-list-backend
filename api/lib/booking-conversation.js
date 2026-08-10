@@ -1,4 +1,6 @@
-// Gravity Arena Hermes Booking Regression Fix R1.3 — transactional conversation state + activity isolation
+// Gravity Arena Hermes Booking Regression Fix R1.4
+// Commit-Path Enforcement & Transaction State Continuity
+
 const ACTIVITY_ALIASES = [
   { code: "FPV_RACING", name: "FPV Drone Racing", terms: ["fpv", "fpv racing", "drone racing"] },
   { code: "VR_RACING", name: "VR Racing", terms: ["vr racing", "virtual reality racing", "vr experience", "virtual reality experience", "vr"] },
@@ -21,6 +23,7 @@ function bookingConfig() {
 async function bookingRequest(path, options = {}) {
   const config = bookingConfig();
   if (!config) throw new Error("Booking API configuration is incomplete.");
+
   const response = await fetch(`${config.baseUrl}${path}`, {
     ...options,
     headers: {
@@ -30,9 +33,13 @@ async function bookingRequest(path, options = {}) {
     },
     signal: AbortSignal.timeout(8000),
   });
+
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(`Booking API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
+    const error = new Error(`Booking API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`);
+    error.status = response.status;
+    error.payload = data;
+    throw error;
   }
   return data;
 }
@@ -50,7 +57,7 @@ function johannesburgDate(offsetDays = 0) {
 }
 
 function detectActivityCode(text = "") {
-  const normalized = text.toLowerCase();
+  const normalized = String(text).toLowerCase();
   return ACTIVITY_ALIASES.find((a) => a.terms.some((term) => normalized.includes(term)))?.code || null;
 }
 
@@ -59,6 +66,7 @@ function activityName(code) {
 }
 
 function detectBookingDate(text = "") {
+  text = String(text);
   const iso = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1];
   if (iso) return iso;
 
@@ -67,66 +75,75 @@ function detectBookingDate(text = "") {
   if (normalized.includes("today")) return johannesburgDate(0);
 
   const monthMap = {
-    january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3,
-    april: 4, apr: 4, may: 5, june: 6, jun: 6, july: 7, jul: 7,
-    august: 8, aug: 8, september: 9, sep: 9, sept: 9,
-    october: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12,
+    january:1, jan:1, february:2, feb:2, march:3, mar:3,
+    april:4, apr:4, may:5, june:6, jun:6, july:7, jul:7,
+    august:8, aug:8, september:9, sep:9, sept:9,
+    october:10, oct:10, november:11, nov:11, december:12, dec:12,
   };
 
   let m = normalized.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(20\d{2})\b/i);
   if (m) {
-    const day = Number(m[1]), month = monthMap[m[2].toLowerCase()], year = Number(m[3]);
-    if (day >= 1 && day <= 31 && month) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const day=Number(m[1]), month=monthMap[m[2].toLowerCase()], year=Number(m[3]);
+    if (day>=1 && day<=31 && month) return `${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
   }
 
   m = normalized.match(/\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,)?\s+(20\d{2})\b/i);
   if (m) {
-    const month = monthMap[m[1].toLowerCase()], day = Number(m[2]), year = Number(m[3]);
-    if (day >= 1 && day <= 31 && month) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const month=monthMap[m[1].toLowerCase()], day=Number(m[2]), year=Number(m[3]);
+    if (day>=1 && day<=31 && month) return `${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
   }
 
   m = normalized.match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2})\b/);
   if (m) {
-    const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const day=Number(m[1]), month=Number(m[2]), year=Number(m[3]);
+    if (day>=1 && day<=31 && month>=1 && month<=12) return `${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
   }
-
   return null;
 }
 
 function detectGuestCount(text = "") {
+  const valueText = String(text).trim();
+
+  // R1.4: a bare reply such as "4" is a valid answer to "How many guests?"
+  // This was the primary state-continuity regression in R1.3.
+  const bare = valueText.match(/^(\d{1,2})$/);
+  if (bare) {
+    const value = Number(bare[1]);
+    if (value > 0 && value <= 100) return value;
+  }
+
   const patterns = [
     /(\d{1,2})\s*(?:people|guests|persons|players|adults|kids|children)/i,
     /\bfor\s+(\d{1,2})\b/i,
   ];
   for (const pattern of patterns) {
-    const value = Number(text.match(pattern)?.[1] || 0);
+    const value = Number(valueText.match(pattern)?.[1] || 0);
     if (value > 0 && value <= 100) return value;
   }
   return null;
 }
 
 function extractEmail(text = "") {
-  return text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || null;
+  return String(text).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || null;
 }
 
 function detectCustomerName(text = "") {
+  text = String(text);
   const email = extractEmail(text);
   if (!email) return null;
 
   const idx = text.toLowerCase().indexOf(email.toLowerCase());
-  const beforeEmail = idx >= 0 ? text.slice(0, idx).replace(/[,:;|]+$/g, "").trim() : "";
+  const beforeEmail = idx >= 0 ? text.slice(0, idx).trim().replace(/[,:;|]+$/g, "").trim() : "";
 
   if (/^[A-Za-z][A-Za-z' -]{1,79}$/.test(beforeEmail) && beforeEmail.split(/\s+/).length <= 6) {
     return beforeEmail;
   }
 
-  const named = text.match(/\b(?:my name is|name is|i am|i'm)\s+([A-Za-z][A-Za-z' -]{1,79}?)(?=\s*(?:,|;|\||and\s+my\s+email|email|$))/i)?.[1]?.trim();
-  return named || null;
+  return text.match(/\b(?:my name is|name is|i am|i'm)\s+([A-Za-z][A-Za-z' -]{1,79}?)(?=\s*(?:,|;|\||and\s+my\s+email|email|$))/i)?.[1]?.trim() || null;
 }
 
 function detectPreferredPeriod(text = "") {
-  const n = text.toLowerCase();
+  const n = String(text).toLowerCase();
   if (/\bmorning\b/.test(n)) return "MORNING";
   if (/\bafternoon\b/.test(n)) return "AFTERNOON";
   if (/\bevening\b|\bnight\b/.test(n)) return "EVENING";
@@ -134,32 +151,36 @@ function detectPreferredPeriod(text = "") {
 }
 
 function detectSelectedTime(text = "") {
+  text = String(text);
   let m = text.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
-  if (m) return `${String(Number(m[1])).padStart(2, "0")}:${m[2]}`;
+  if (m) return `${String(Number(m[1])).padStart(2,"0")}:${m[2]}`;
+
   m = text.match(/\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)\b/i);
   if (!m) return null;
-  let hour = Number(m[1]);
-  const minute = m[2] || "00";
-  const meridiem = m[3].toLowerCase();
-  if (meridiem === "pm" && hour !== 12) hour += 12;
-  if (meridiem === "am" && hour === 12) hour = 0;
-  return `${String(hour).padStart(2, "0")}:${minute}`;
+
+  let hour=Number(m[1]);
+  const minute=m[2]||"00";
+  const meridiem=m[3].toLowerCase();
+  if (meridiem==="pm" && hour!==12) hour+=12;
+  if (meridiem==="am" && hour===12) hour=0;
+  return `${String(hour).padStart(2,"0")}:${minute}`;
 }
 
 function detectSlotId(text = "") {
-  const value = Number(text.match(/\bslot\s*#?\s*(\d+)\b/i)?.[1] || 0);
+  const value = Number(String(text).match(/\bslot\s*#?\s*(\d+)\b/i)?.[1] || 0);
   return value > 0 ? value : null;
 }
 
 function hasBookingIntent(text = "") {
-  return /\b(book|booking|reserve|reservation|slot|availability|times? available)\b/i.test(text);
+  return /\b(book|booking|reserve|reservation|slot|availability|times? available)\b/i.test(String(text));
 }
 
 function isResetIntent(text = "") {
-  return /\b(start over|start again|restart|begin again|reset(?: the)? booking|forget (?:that|this)|clear (?:that|this))\b/i.test(text);
+  return /\b(start over|start again|restart|begin again|reset(?: the)? booking|forget (?:that|this)|clear (?:that|this))\b/i.test(String(text));
 }
 
 function isExplicitNewBookingStart(text = "") {
+  text = String(text);
   return /\b(?:i\s+)?(?:would like|want|need)\s+to\s+(?:make\s+)?(?:a\s+)?(?:book|booking|reserve)\b/i.test(text) ||
     /\b(?:please\s+)?(?:book|reserve)\b/i.test(text) ||
     /\bmake\s+(?:a\s+)?booking\b/i.test(text) ||
@@ -167,6 +188,7 @@ function isExplicitNewBookingStart(text = "") {
 }
 
 function isOfferingsQuery(text = "") {
+  text = String(text);
   return /\bwhat (?:activities|experiences|services).*gravity arena\b/i.test(text) ||
     /\bwhat (?:does|do) gravity arena offer\b/i.test(text) ||
     /\b(?:provide|give|show).*list.*gravity arena.*offer/i.test(text) ||
@@ -176,13 +198,14 @@ function isOfferingsQuery(text = "") {
 function formatOfferings() {
   return [
     "Gravity Arena currently offers:",
-    ...ACTIVITY_ALIASES.map((a) => `• ${a.name}`),
+    ...ACTIVITY_ALIASES.map((a)=>`• ${a.name}`),
     "",
     "If you’d like to make a booking, tell me which activity you’re interested in.",
   ].join("\n");
 }
 
 function isTerminalAssistantMessage(text = "") {
+  text = String(text);
   return /(?:your\s+)?(?:gravity arena\s+)?booking is confirmed!?/i.test(text) ||
     /(?:your\s+)?(?:gravity arena\s+)?booking has been cancelled/i.test(text) ||
     /\bstatus:\s*(?:cancelled|expired)\b/i.test(text) ||
@@ -190,121 +213,104 @@ function isTerminalAssistantMessage(text = "") {
 }
 
 function isAffirmativeBookingReply(text = "") {
-  return /^(?:yes|yes please|confirm|confirm it|please confirm|go ahead|proceed|book it|do it|okay|ok)$/i.test(String(text || "").trim());
+  return /^(?:yes|yes please|confirm|confirm it|please confirm|go ahead|proceed|book it|do it|okay|ok)$/i.test(String(text).trim());
 }
 
 function findSessionBoundary(history = []) {
   let boundary = 0;
+  history.forEach((item,index)=>{
+    const text=String(item?.content||item?.text||"");
 
-  history.forEach((item, index) => {
-    const text = String(item?.content || item?.text || "");
-
-    // A successful/cancelled booking closes the transaction. Nothing before it may
-    // seed a later booking.
-    if (item.role === "assistant" && isTerminalAssistantMessage(text)) {
-      boundary = index + 1;
+    if (item.role==="assistant" && isTerminalAssistantMessage(text)) {
+      boundary=index+1;
       return;
     }
-
-    // A clearly new booking request is also a hard boundary. This is essential when
-    // a user changes from FPV to VR (or vice versa) without explicitly saying "reset".
-    if (item.role === "user" && (isResetIntent(text) || isExplicitNewBookingStart(text))) {
-      boundary = index;
+    if (item.role==="user" && (isResetIntent(text)||isExplicitNewBookingStart(text))) {
+      boundary=index;
     }
   });
-
   return boundary;
 }
 
 function deriveContext(message, history = []) {
-  const boundary = findSessionBoundary(history);
-  const activeHistory = history.slice(boundary);
+  const boundary=findSessionBoundary(history);
+  const activeHistory=history.slice(boundary);
 
-  const context = {
-    active: false,
-    activityCode: null,
-    date: null,
-    guestCount: null,
-    email: null,
-    customerName: null,
-    preferredPeriod: null,
-    selectedTime: null,
-    slotId: null,
-    transactionBoundary: boundary,
+  const context={
+    active:false,
+    activityCode:null,
+    date:null,
+    guestCount:null,
+    email:null,
+    customerName:null,
+    preferredPeriod:null,
+    selectedTime:null,
+    slotId:null,
+    transactionBoundary:boundary,
   };
 
-  const applyText = (text = "") => {
-    const activity = detectActivityCode(text);
-    const date = detectBookingDate(text);
-    const guests = detectGuestCount(text);
-    const email = extractEmail(text);
-    const customerName = detectCustomerName(text);
-    const preferredPeriod = detectPreferredPeriod(text);
-    const selectedTime = detectSelectedTime(text);
-    const slotId = detectSlotId(text);
+  const applyText=(text="")=>{
+    const activity=detectActivityCode(text);
+    const date=detectBookingDate(text);
+    const guests=detectGuestCount(text);
+    const email=extractEmail(text);
+    const customerName=detectCustomerName(text);
+    const preferredPeriod=detectPreferredPeriod(text);
+    const selectedTime=detectSelectedTime(text);
+    const slotId=detectSlotId(text);
 
-    context.active = context.active ||
-      hasBookingIntent(text) ||
-      Boolean(activity) ||
-      Boolean(date) ||
-      Boolean(guests) ||
-      Boolean(email) ||
-      Boolean(preferredPeriod) ||
-      Boolean(selectedTime) ||
-      Boolean(slotId);
+    context.active=context.active ||
+      hasBookingIntent(text) || Boolean(activity) || Boolean(date) || Boolean(guests) ||
+      Boolean(email) || Boolean(customerName) || Boolean(preferredPeriod) ||
+      Boolean(selectedTime) || Boolean(slotId);
 
-    // Explicit activity changes are authoritative. If a live transaction switches
-    // activity, inventory-specific state from the old activity must not survive.
-    if (activity && context.activityCode && activity !== context.activityCode) {
-      context.activityCode = activity;
-      context.date = null;
-      context.guestCount = null;
-      context.preferredPeriod = null;
-      context.selectedTime = null;
-      context.slotId = null;
+    if (activity && context.activityCode && activity!==context.activityCode) {
+      context.activityCode=activity;
+      // Do not leak inventory state from the previous activity.
+      context.date=null;
+      context.guestCount=null;
+      context.preferredPeriod=null;
+      context.selectedTime=null;
+      context.slotId=null;
     } else if (activity) {
-      context.activityCode = activity;
+      context.activityCode=activity;
     }
 
-    if (date) context.date = date;
-    if (guests) context.guestCount = guests;
-    if (email) context.email = email;
-    if (customerName) context.customerName = customerName;
-    if (preferredPeriod) context.preferredPeriod = preferredPeriod;
-    if (selectedTime) context.selectedTime = selectedTime;
-    if (slotId) context.slotId = slotId;
+    if (date) context.date=date;
+    if (guests) context.guestCount=guests;
+    if (email) context.email=email;
+    if (customerName) context.customerName=customerName;
+    if (preferredPeriod) context.preferredPeriod=preferredPeriod;
+    if (selectedTime) context.selectedTime=selectedTime;
+    if (slotId) context.slotId=slotId;
   };
 
-  // Only USER messages in the active transaction are allowed to populate booking
-  // fields. Assistant prose and all earlier completed transactions are ignored.
   for (const item of activeHistory) {
-    if (item.role !== "user") continue;
-    applyText(String(item?.content || item?.text || ""));
+    if (item.role!=="user") continue;
+    applyText(String(item?.content||item?.text||""));
   }
 
-  const currentText = String(message?.text || "");
-  const lastActiveUserText = [...activeHistory].reverse().find((i) => i.role === "user");
-  const lastText = String(lastActiveUserText?.content || lastActiveUserText?.text || "");
+  const currentText=String(message?.text||"");
+  const lastActiveUser=[...activeHistory].reverse().find((i)=>i.role==="user");
+  const lastText=String(lastActiveUser?.content||lastActiveUser?.text||"");
 
-  if (!lastActiveUserText || lastText !== currentText) {
-    applyText(currentText);
-  }
-
+  if (!lastActiveUser || lastText!==currentText) applyText(currentText);
   return context;
 }
 
 function currentHasBookingField(text = "") {
   return Boolean(
-    detectActivityCode(text) || detectBookingDate(text) || detectGuestCount(text) || extractEmail(text) || detectCustomerName(text) ||
-    detectPreferredPeriod(text) || detectSelectedTime(text) || detectSlotId(text) || isAffirmativeBookingReply(text)
+    detectActivityCode(text) || detectBookingDate(text) || detectGuestCount(text) ||
+    extractEmail(text) || detectCustomerName(text) || detectPreferredPeriod(text) ||
+    detectSelectedTime(text) || detectSlotId(text) || isAffirmativeBookingReply(text)
   );
 }
 
 function periodMatches(startsAt, period) {
-  const hour = Number(String(startsAt).slice(11, 13));
-  if (period === "MORNING") return hour >= 6 && hour < 12;
-  if (period === "AFTERNOON") return hour >= 12 && hour < 17;
-  if (period === "EVENING") return hour >= 17;
+  const hour=Number(String(startsAt).slice(11,13));
+  if (period==="MORNING") return hour>=6 && hour<12;
+  if (period==="AFTERNOON") return hour>=12 && hour<17;
+  if (period==="EVENING") return hour>=17;
   return true;
 }
 
@@ -314,200 +320,159 @@ function formatNaturalSlots(slots, context) {
   }
   return [
     `${activityName(context.activityCode)} availability for ${context.guestCount} guests on ${context.date}:`,
-    ...slots.slice(0, 8).map((slot) => `• ${String(slot.starts_at).slice(11, 16)}–${String(slot.ends_at).slice(11, 16)} — ${slot.remaining_capacity} spaces remaining`),
+    ...slots.slice(0,8).map((slot)=>`• ${String(slot.starts_at).slice(11,16)}–${String(slot.ends_at).slice(11,16)} — ${slot.remaining_capacity} spaces remaining`),
     "",
     "Which time would you prefer?",
   ].join("\n");
 }
 
 async function getAvailability(context) {
-  const params = new URLSearchParams({
-    action: "availability",
-    activity_code: context.activityCode,
-    date: context.date,
-    guest_count: String(context.guestCount),
+  const params=new URLSearchParams({
+    action:"availability",
+    activity_code:context.activityCode,
+    date:context.date,
+    guest_count:String(context.guestCount),
   });
-  const result = await bookingRequest(`/?${params.toString()}`, { method: "GET" });
-  return Array.isArray(result?.slots) ? result.slots : [];
+  const result=await bookingRequest(`/?${params.toString()}`,{method:"GET"});
+  return Array.isArray(result?.slots)?result.slots:[];
 }
 
 async function sendConfirmationEmail(booking) {
-  const apiKey = process.env.BREVO_API_KEY?.trim();
-  const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
-  const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena";
+  const apiKey=process.env.BREVO_API_KEY?.trim();
+  const senderEmail=process.env.BREVO_SENDER_EMAIL?.trim();
+  const senderName=process.env.BREVO_SENDER_NAME?.trim()||"Gravity Arena";
   if (!apiKey || !senderEmail || !booking?.customer_email) return false;
 
-  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
-    method: "POST",
-    headers: { "api-key": apiKey, accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sender: { email: senderEmail, name: senderName },
-      to: [{ email: booking.customer_email, name: booking.customer_name || "Gravity Arena Customer" }],
-      subject: `Gravity Arena booking confirmed: ${booking.booking_reference}`,
-      textContent: [
-        `Hi ${booking.customer_name || "there"},`, "",
+  const response=await fetch("https://api.brevo.com/v3/smtp/email",{
+    method:"POST",
+    headers:{"api-key":apiKey,accept:"application/json","Content-Type":"application/json"},
+    body:JSON.stringify({
+      sender:{email:senderEmail,name:senderName},
+      to:[{email:booking.customer_email,name:booking.customer_name||"Gravity Arena Customer"}],
+      subject:`Gravity Arena booking confirmed: ${booking.booking_reference}`,
+      textContent:[
+        `Hi ${booking.customer_name||"there"},`,"",
         "Your Gravity Arena booking is confirmed.",
         `Reference: ${booking.booking_reference}`,
         `Activity: ${booking.activity_name}`,
         `Date and time: ${booking.starts_at}`,
         `Guests: ${booking.guest_count}`,
       ].join("\n"),
-      tags: ["gravity-arena", "booking-confirmation"],
+      tags:["gravity-arena","booking-confirmation"],
     }),
-    signal: AbortSignal.timeout(8000),
+    signal:AbortSignal.timeout(8000),
   });
   return response.ok;
 }
 
-
-function normalizedEmail(value = "") {
-  return String(value || "").trim().toLowerCase();
+function normalizedEmail(value="") {
+  return String(value||"").trim().toLowerCase();
 }
 
-function bookingIdempotencyKey(message, context, slot) {
-  // Stable across repeated "Yes"/confirmation messages for the same booking intent.
-  // Slot IDs are unique inventory units, so this prevents duplicate holds caused by
-  // retries, webhook re-delivery, or repeated confirmation messages.
-  const parts = [
-    "wa",
-    String(message.from || "").replace(/\D/g, ""),
-    "slot",
-    String(slot?.slot_id || ""),
-    "guests",
-    String(context.guestCount || ""),
-    "email",
-    normalizedEmail(context.email),
-  ];
-  return parts.join(":");
+function bookingIdempotencyKey(message,context,slot) {
+  return [
+    "wa",String(message.from||"").replace(/\D/g,""),
+    "slot",String(slot?.slot_id||""),
+    "guests",String(context.guestCount||""),
+    "email",normalizedEmail(context.email),
+  ].join(":");
 }
 
-function assertPersistedConfirmedBooking(held, confirmed, context, slot) {
-  const booking = confirmed?.booking;
-  const reference = booking?.booking_reference;
+function assertPersistedConfirmedBooking(held,confirmed,context,slot) {
+  const booking=confirmed?.booking;
+  const reference=booking?.booking_reference;
 
-  // Fail closed. Never tell the customer a booking is confirmed using only a
-  // pre-confirm/hold reference. The confirmation API must return the persisted booking.
   if (!booking || !reference || !/^GA-\d{8}-\d{6}$/.test(String(reference))) {
-    console.error("Hermes booking integrity check failed: confirmation response lacks persisted booking", {
-      heldReference: held?.booking_reference || null,
-      confirmedKeys: confirmed && typeof confirmed === "object" ? Object.keys(confirmed) : [],
-    });
     throw new Error("BOOKING_PERSISTENCE_NOT_VERIFIED");
   }
 
-  const expectedSlotId = Number(slot?.slot_id);
-  const persistedSlotId = Number(booking?.slot_id);
-  if (Number.isFinite(expectedSlotId) && expectedSlotId > 0 &&
-      Number.isFinite(persistedSlotId) && persistedSlotId > 0 &&
-      expectedSlotId !== persistedSlotId) {
-    console.error("Hermes booking integrity check failed: slot mismatch", {
-      expectedSlotId, persistedSlotId, reference,
-    });
+  if (String(booking.status||"").toUpperCase()!=="CONFIRMED") {
+    throw new Error("BOOKING_STATUS_NOT_CONFIRMED");
+  }
+
+  const expectedSlotId=Number(slot?.slot_id);
+  const persistedSlotId=Number(booking?.slot_id);
+  if (expectedSlotId>0 && persistedSlotId>0 && expectedSlotId!==persistedSlotId) {
     throw new Error("BOOKING_SLOT_MISMATCH");
   }
 
-  const expectedGuests = Number(context?.guestCount);
-  const persistedGuests = Number(booking?.guest_count);
-  if (Number.isFinite(expectedGuests) && expectedGuests > 0 &&
-      Number.isFinite(persistedGuests) && persistedGuests > 0 &&
-      expectedGuests !== persistedGuests) {
-    console.error("Hermes booking integrity check failed: guest-count mismatch", {
-      expectedGuests, persistedGuests, reference,
-    });
+  const expectedGuests=Number(context?.guestCount);
+  const persistedGuests=Number(booking?.guest_count);
+  if (expectedGuests>0 && persistedGuests>0 && expectedGuests!==persistedGuests) {
     throw new Error("BOOKING_GUEST_COUNT_MISMATCH");
   }
 
-  const expectedEmail = normalizedEmail(context?.email);
-  const persistedEmail = normalizedEmail(booking?.customer_email);
-  if (expectedEmail && persistedEmail && expectedEmail !== persistedEmail) {
-    console.error("Hermes booking integrity check failed: email mismatch", {
-      expectedEmail, persistedEmail, reference,
-    });
+  const expectedEmail=normalizedEmail(context?.email);
+  const persistedEmail=normalizedEmail(booking?.customer_email);
+  if (expectedEmail && persistedEmail && expectedEmail!==persistedEmail) {
     throw new Error("BOOKING_EMAIL_MISMATCH");
-  }
-
-  // If booking-create and booking-confirm disagree on references, the confirm response
-  // is authoritative because it represents the persisted booking. This can happen on
-  // an idempotent replay. We reuse the persisted reference rather than exposing a
-  // transient/unpersisted hold reference.
-  if (held?.booking_reference && held.booking_reference !== reference) {
-    console.warn("Hermes booking idempotency replay detected; using persisted reference", {
-      heldReference: held.booking_reference,
-      persistedReference: reference,
-    });
   }
 
   return booking;
 }
 
-async function confirmBooking(message, context, slot) {
-  const idempotencyKey = bookingIdempotencyKey(message, context, slot);
+async function confirmBooking(message,context,slot) {
+  const idempotencyKey=bookingIdempotencyKey(message,context,slot);
 
   try {
-    const held = await bookingRequest("/?action=booking-create", {
-      method: "POST",
-      body: JSON.stringify({
-        wa_id: message.from,
-        slot_id: Number(slot.slot_id),
-        guest_count: context.guestCount,
-        customer_name: context.customerName || message.displayName || "",
-        customer_email: context.email,
-        notes: "Created through Gravity Arena conversational booking flow",
-        idempotency_key: idempotencyKey,
+    const held=await bookingRequest("/?action=booking-create",{
+      method:"POST",
+      body:JSON.stringify({
+        wa_id:message.from,
+        slot_id:Number(slot.slot_id),
+        guest_count:context.guestCount,
+        customer_name:context.customerName||message.displayName||"",
+        customer_email:context.email,
+        notes:"Created through Gravity Arena Hermes R1.4 conversational booking flow",
+        idempotency_key:idempotencyKey,
       }),
     });
 
     if (!held?.booking_reference) {
-      console.error("Hermes booking integrity check failed: booking-create returned no reference", {
-        responseKeys: held && typeof held === "object" ? Object.keys(held) : [],
-        idempotencyKey,
-      });
       return [
         "I could not safely complete that booking because the booking record could not be verified.",
         "No confirmation has been issued.",
-        "Please try again in a moment or contact Gravity Arena support.",
+        "Please try again in a moment.",
       ].join("\n");
     }
 
-    const confirmed = await bookingRequest("/?action=booking-confirm", {
-      method: "POST",
-      body: JSON.stringify({ booking_reference: held.booking_reference }),
+    const confirmed=await bookingRequest("/?action=booking-confirm",{
+      method:"POST",
+      body:JSON.stringify({booking_reference:held.booking_reference}),
     });
 
     let booking;
     try {
-      booking = assertPersistedConfirmedBooking(held, confirmed, context, slot);
-    } catch (integrityError) {
-      console.error("Hermes refused to send an unverified booking confirmation", {
-        error: integrityError?.message || String(integrityError),
-        heldReference: held?.booking_reference || null,
+      booking=assertPersistedConfirmedBooking(held,confirmed,context,slot);
+    } catch (error) {
+      console.error("Hermes R1.4 persistence verification failed",{
+        error:error?.message||String(error),
+        heldReference:held?.booking_reference||null,
         idempotencyKey,
       });
       return [
         "I could not safely verify that the booking was persisted, so I have not issued a confirmation.",
-        "Please try again in a moment. If the problem continues, a Gravity Arena team member can assist.",
+        "Please try again in a moment.",
       ].join("\n");
     }
 
-    const emailSent = confirmed?.already_confirmed
-      ? true
-      : await sendConfirmationEmail(booking);
+    const emailSent=confirmed?.already_confirmed ? true : await sendConfirmationEmail(booking);
 
     return [
       "✅ Your Gravity Arena booking is confirmed.",
       `Reference: ${booking.booking_reference}`,
-      `Activity: ${booking.activity_name || activityName(context.activityCode)}`,
+      `Activity: ${booking.activity_name||activityName(context.activityCode)}`,
       `Date and time: ${booking.starts_at}`,
-      `Guests: ${booking.guest_count || context.guestCount}`,
+      `Guests: ${booking.guest_count||context.guestCount}`,
       "",
       emailSent
-        ? `A confirmation email has been sent to ${booking.customer_email || context.email}.`
+        ? `A confirmation email has been sent to ${booking.customer_email||context.email}.`
         : "Your booking is confirmed, but I could not send the confirmation email. Your booking reference above is valid.",
     ].join("\n");
   } catch (error) {
-    console.error("Hermes booking create/confirm failed", {
-      error: error?.message || String(error),
-      slotId: slot?.slot_id || null,
+    console.error("Hermes R1.4 booking create/confirm failed",{
+      error:error?.message||String(error),
+      slotId:slot?.slot_id||null,
       idempotencyKey,
     });
     return [
@@ -520,57 +485,72 @@ async function confirmBooking(message, context, slot) {
 
 export async function handleConversationalBooking(message, history = []) {
   if (!bookingConfig()) return null;
-  const text = message.text || "";
+  const text=message.text||"";
 
   if (isResetIntent(text)) {
     return "Absolutely — we can start over. Which Gravity Arena activity would you like to book?";
   }
-
   if (isOfferingsQuery(text)) return formatOfferings();
 
-  const currentStartsBooking = isExplicitNewBookingStart(text) || hasBookingIntent(text) || Boolean(detectActivityCode(text));
-  const currentContinuesBooking = currentHasBookingField(text);
+  const currentStartsBooking=isExplicitNewBookingStart(text)||hasBookingIntent(text)||Boolean(detectActivityCode(text));
+  const currentContinuesBooking=currentHasBookingField(text);
+  const context=deriveContext(message,history);
 
-  const context = deriveContext(message, history);
-
-  // Prevent old booking memory from hijacking unrelated messages such as "Hi".
-  // A bare "Yes" is only considered booking input when there is still an active,
-  // incomplete transaction after the latest hard boundary.
   if (!currentStartsBooking && !currentContinuesBooking) return null;
   if (isAffirmativeBookingReply(text) && !context.active) return null;
   if (!context.active) return null;
 
-  console.log("Hermes booking context", {
-    activityCode: context.activityCode,
-    date: context.date,
-    guestCount: context.guestCount,
-    emailPresent: Boolean(context.email),
-    customerNamePresent: Boolean(context.customerName),
-    preferredPeriod: context.preferredPeriod,
-    selectedTime: context.selectedTime,
-    slotId: context.slotId,
-    transactionBoundary: context.transactionBoundary,
+  console.log("Hermes booking context R1.4",{
+    activityCode:context.activityCode,
+    date:context.date,
+    guestCount:context.guestCount,
+    emailPresent:Boolean(context.email),
+    customerNamePresent:Boolean(context.customerName),
+    preferredPeriod:context.preferredPeriod,
+    selectedTime:context.selectedTime,
+    slotId:context.slotId,
+    transactionBoundary:context.transactionBoundary,
   });
 
   if (!context.activityCode) return "Absolutely. Which Gravity Arena activity would you like to book?";
   if (!context.guestCount) return `Great — ${activityName(context.activityCode)}. How many guests will be attending?`;
   if (!context.date) return `Great — ${activityName(context.activityCode)} for ${context.guestCount} guests. What date would you like? You can say today, tomorrow, or use YYYY-MM-DD.`;
 
-  const slots = await getAvailability(context);
+  const slots=await getAvailability(context);
 
   if (context.preferredPeriod && !context.selectedTime && !context.slotId) {
-    return formatNaturalSlots(slots.filter((s) => periodMatches(s.starts_at, context.preferredPeriod)), context);
+    return formatNaturalSlots(slots.filter((s)=>periodMatches(s.starts_at,context.preferredPeriod)),context);
   }
 
-  let selectedSlot = null;
-  if (context.slotId) selectedSlot = slots.find((s) => Number(s.slot_id) === Number(context.slotId));
-  if (!selectedSlot && context.selectedTime) selectedSlot = slots.find((s) => String(s.starts_at).slice(11, 16) === context.selectedTime);
+  let selectedSlot=null;
+  if (context.slotId) selectedSlot=slots.find((s)=>Number(s.slot_id)===Number(context.slotId));
+  if (!selectedSlot && context.selectedTime) {
+    selectedSlot=slots.find((s)=>String(s.starts_at).slice(11,16)===context.selectedTime);
+  }
 
   if (context.selectedTime || context.slotId) {
-    if (!selectedSlot) return ["That time is not currently available.", "", formatNaturalSlots(slots, context)].join("\n");
-    if (!context.email) return `Great — ${String(selectedSlot.starts_at).slice(11, 16)} is available for ${context.guestCount} guests. Please send the email address for the booking confirmation.`;
-    return confirmBooking(message, context, selectedSlot);
+    if (!selectedSlot) {
+      return ["That time is not currently available.","",formatNaturalSlots(slots,context)].join("\n");
+    }
+
+    if (!context.email) {
+      return `Great — ${String(selectedSlot.starts_at).slice(11,16)} is available for ${context.guestCount} guests. Please send your name and email address for the booking confirmation.`;
+    }
+
+    // R1.4 COMMIT GATE:
+    // Once the transaction has activity + guest count + date + selected inventory + email,
+    // the deterministic booking engine owns the turn. Do not fall through to the LLM.
+    return confirmBooking(message,context,selectedSlot);
   }
 
-  return formatNaturalSlots(slots, context);
+  return formatNaturalSlots(slots,context);
 }
+
+// Test-only exports: harmless in production and allow deterministic regression testing.
+export const __test = {
+  detectGuestCount,
+  detectBookingDate,
+  detectSelectedTime,
+  deriveContext,
+  bookingIdempotencyKey,
+};

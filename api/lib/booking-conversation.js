@@ -1,4 +1,4 @@
-// Gravity Arena Hermes Booking Regression Fix R1.2 — persisted reference verification + idempotency replay protection
+// Gravity Arena Hermes Booking Regression Fix R1.3 — transactional conversation state + activity isolation
 const ACTIVITY_ALIASES = [
   { code: "FPV_RACING", name: "FPV Drone Racing", terms: ["fpv", "fpv racing", "drone racing"] },
   { code: "VR_RACING", name: "VR Racing", terms: ["vr racing", "virtual reality racing", "vr experience", "virtual reality experience", "vr"] },
@@ -160,7 +160,8 @@ function isResetIntent(text = "") {
 }
 
 function isExplicitNewBookingStart(text = "") {
-  return /\b(?:i\s+)?(?:would like|want|need)\s+to\s+(?:make\s+)?(?:a\s+)?booking\b/i.test(text) ||
+  return /\b(?:i\s+)?(?:would like|want|need)\s+to\s+(?:make\s+)?(?:a\s+)?(?:book|booking|reserve)\b/i.test(text) ||
+    /\b(?:please\s+)?(?:book|reserve)\b/i.test(text) ||
     /\bmake\s+(?:a\s+)?booking\b/i.test(text) ||
     /\bnew booking\b/i.test(text);
 }
@@ -182,25 +183,42 @@ function formatOfferings() {
 }
 
 function isTerminalAssistantMessage(text = "") {
-  return /your gravity arena booking is confirmed/i.test(text) ||
-    /your gravity arena booking has been cancelled/i.test(text) ||
-    /\bstatus:\s*(?:cancelled|expired)\b/i.test(text);
+  return /(?:your\s+)?(?:gravity arena\s+)?booking is confirmed!?/i.test(text) ||
+    /(?:your\s+)?(?:gravity arena\s+)?booking has been cancelled/i.test(text) ||
+    /\bstatus:\s*(?:cancelled|expired)\b/i.test(text) ||
+    /\bReference:\s*GA-\d{8}-\d{6}\b/i.test(text);
+}
+
+function isAffirmativeBookingReply(text = "") {
+  return /^(?:yes|yes please|confirm|confirm it|please confirm|go ahead|proceed|book it|do it|okay|ok)$/i.test(String(text || "").trim());
 }
 
 function findSessionBoundary(history = []) {
   let boundary = 0;
+
   history.forEach((item, index) => {
-    const text = item.content || "";
-    if (item.role === "assistant" && isTerminalAssistantMessage(text)) boundary = index + 1;
-    if (item.role === "user" && (isResetIntent(text) || isExplicitNewBookingStart(text))) boundary = index;
+    const text = String(item?.content || item?.text || "");
+
+    // A successful/cancelled booking closes the transaction. Nothing before it may
+    // seed a later booking.
+    if (item.role === "assistant" && isTerminalAssistantMessage(text)) {
+      boundary = index + 1;
+      return;
+    }
+
+    // A clearly new booking request is also a hard boundary. This is essential when
+    // a user changes from FPV to VR (or vice versa) without explicitly saying "reset".
+    if (item.role === "user" && (isResetIntent(text) || isExplicitNewBookingStart(text))) {
+      boundary = index;
+    }
   });
+
   return boundary;
 }
 
 function deriveContext(message, history = []) {
-  const active = history.slice(findSessionBoundary(history));
-  const userTexts = active.filter((i) => i.role === "user").map((i) => i.content);
-  if (!userTexts.length || userTexts[userTexts.length - 1] !== message.text) userTexts.push(message.text);
+  const boundary = findSessionBoundary(history);
+  const activeHistory = history.slice(boundary);
 
   const context = {
     active: false,
@@ -212,26 +230,73 @@ function deriveContext(message, history = []) {
     preferredPeriod: null,
     selectedTime: null,
     slotId: null,
+    transactionBoundary: boundary,
   };
 
-  for (const text of userTexts) {
-    context.active = context.active || hasBookingIntent(text) || Boolean(detectActivityCode(text));
-    context.activityCode = detectActivityCode(text) || context.activityCode;
-    context.date = detectBookingDate(text) || context.date;
-    context.guestCount = detectGuestCount(text) || context.guestCount;
-    context.email = extractEmail(text) || context.email;
-    context.customerName = detectCustomerName(text) || context.customerName;
-    context.preferredPeriod = detectPreferredPeriod(text) || context.preferredPeriod;
-    context.selectedTime = detectSelectedTime(text) || context.selectedTime;
-    context.slotId = detectSlotId(text) || context.slotId;
+  const applyText = (text = "") => {
+    const activity = detectActivityCode(text);
+    const date = detectBookingDate(text);
+    const guests = detectGuestCount(text);
+    const email = extractEmail(text);
+    const customerName = detectCustomerName(text);
+    const preferredPeriod = detectPreferredPeriod(text);
+    const selectedTime = detectSelectedTime(text);
+    const slotId = detectSlotId(text);
+
+    context.active = context.active ||
+      hasBookingIntent(text) ||
+      Boolean(activity) ||
+      Boolean(date) ||
+      Boolean(guests) ||
+      Boolean(email) ||
+      Boolean(preferredPeriod) ||
+      Boolean(selectedTime) ||
+      Boolean(slotId);
+
+    // Explicit activity changes are authoritative. If a live transaction switches
+    // activity, inventory-specific state from the old activity must not survive.
+    if (activity && context.activityCode && activity !== context.activityCode) {
+      context.activityCode = activity;
+      context.date = null;
+      context.guestCount = null;
+      context.preferredPeriod = null;
+      context.selectedTime = null;
+      context.slotId = null;
+    } else if (activity) {
+      context.activityCode = activity;
+    }
+
+    if (date) context.date = date;
+    if (guests) context.guestCount = guests;
+    if (email) context.email = email;
+    if (customerName) context.customerName = customerName;
+    if (preferredPeriod) context.preferredPeriod = preferredPeriod;
+    if (selectedTime) context.selectedTime = selectedTime;
+    if (slotId) context.slotId = slotId;
+  };
+
+  // Only USER messages in the active transaction are allowed to populate booking
+  // fields. Assistant prose and all earlier completed transactions are ignored.
+  for (const item of activeHistory) {
+    if (item.role !== "user") continue;
+    applyText(String(item?.content || item?.text || ""));
   }
+
+  const currentText = String(message?.text || "");
+  const lastActiveUserText = [...activeHistory].reverse().find((i) => i.role === "user");
+  const lastText = String(lastActiveUserText?.content || lastActiveUserText?.text || "");
+
+  if (!lastActiveUserText || lastText !== currentText) {
+    applyText(currentText);
+  }
+
   return context;
 }
 
 function currentHasBookingField(text = "") {
   return Boolean(
     detectActivityCode(text) || detectBookingDate(text) || detectGuestCount(text) || extractEmail(text) || detectCustomerName(text) ||
-    detectPreferredPeriod(text) || detectSelectedTime(text) || detectSlotId(text)
+    detectPreferredPeriod(text) || detectSelectedTime(text) || detectSlotId(text) || isAffirmativeBookingReply(text)
   );
 }
 
@@ -466,10 +531,13 @@ export async function handleConversationalBooking(message, history = []) {
   const currentStartsBooking = isExplicitNewBookingStart(text) || hasBookingIntent(text) || Boolean(detectActivityCode(text));
   const currentContinuesBooking = currentHasBookingField(text);
 
-  // Prevent old booking memory from hijacking unrelated messages such as “Hi”.
-  if (!currentStartsBooking && !currentContinuesBooking) return null;
-
   const context = deriveContext(message, history);
+
+  // Prevent old booking memory from hijacking unrelated messages such as "Hi".
+  // A bare "Yes" is only considered booking input when there is still an active,
+  // incomplete transaction after the latest hard boundary.
+  if (!currentStartsBooking && !currentContinuesBooking) return null;
+  if (isAffirmativeBookingReply(text) && !context.active) return null;
   if (!context.active) return null;
 
   console.log("Hermes booking context", {
@@ -481,6 +549,7 @@ export async function handleConversationalBooking(message, history = []) {
     preferredPeriod: context.preferredPeriod,
     selectedTime: context.selectedTime,
     slotId: context.slotId,
+    transactionBoundary: context.transactionBoundary,
   });
 
   if (!context.activityCode) return "Absolutely. Which Gravity Arena activity would you like to book?";

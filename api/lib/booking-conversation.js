@@ -1,4 +1,4 @@
-// Gravity Arena Hermes Booking Regression Fix R1
+// Gravity Arena Hermes Booking Regression Fix R1.2 — persisted reference verification + idempotency replay protection
 const ACTIVITY_ALIASES = [
   { code: "FPV_RACING", name: "FPV Drone Racing", terms: ["fpv", "fpv racing", "drone racing"] },
   { code: "VR_RACING", name: "VR Racing", terms: ["vr racing", "virtual reality racing", "vr experience", "virtual reality experience", "vr"] },
@@ -294,38 +294,163 @@ async function sendConfirmationEmail(booking) {
   return response.ok;
 }
 
+
+function normalizedEmail(value = "") {
+  return String(value || "").trim().toLowerCase();
+}
+
+function bookingIdempotencyKey(message, context, slot) {
+  // Stable across repeated "Yes"/confirmation messages for the same booking intent.
+  // Slot IDs are unique inventory units, so this prevents duplicate holds caused by
+  // retries, webhook re-delivery, or repeated confirmation messages.
+  const parts = [
+    "wa",
+    String(message.from || "").replace(/\D/g, ""),
+    "slot",
+    String(slot?.slot_id || ""),
+    "guests",
+    String(context.guestCount || ""),
+    "email",
+    normalizedEmail(context.email),
+  ];
+  return parts.join(":");
+}
+
+function assertPersistedConfirmedBooking(held, confirmed, context, slot) {
+  const booking = confirmed?.booking;
+  const reference = booking?.booking_reference;
+
+  // Fail closed. Never tell the customer a booking is confirmed using only a
+  // pre-confirm/hold reference. The confirmation API must return the persisted booking.
+  if (!booking || !reference || !/^GA-\d{8}-\d{6}$/.test(String(reference))) {
+    console.error("Hermes booking integrity check failed: confirmation response lacks persisted booking", {
+      heldReference: held?.booking_reference || null,
+      confirmedKeys: confirmed && typeof confirmed === "object" ? Object.keys(confirmed) : [],
+    });
+    throw new Error("BOOKING_PERSISTENCE_NOT_VERIFIED");
+  }
+
+  const expectedSlotId = Number(slot?.slot_id);
+  const persistedSlotId = Number(booking?.slot_id);
+  if (Number.isFinite(expectedSlotId) && expectedSlotId > 0 &&
+      Number.isFinite(persistedSlotId) && persistedSlotId > 0 &&
+      expectedSlotId !== persistedSlotId) {
+    console.error("Hermes booking integrity check failed: slot mismatch", {
+      expectedSlotId, persistedSlotId, reference,
+    });
+    throw new Error("BOOKING_SLOT_MISMATCH");
+  }
+
+  const expectedGuests = Number(context?.guestCount);
+  const persistedGuests = Number(booking?.guest_count);
+  if (Number.isFinite(expectedGuests) && expectedGuests > 0 &&
+      Number.isFinite(persistedGuests) && persistedGuests > 0 &&
+      expectedGuests !== persistedGuests) {
+    console.error("Hermes booking integrity check failed: guest-count mismatch", {
+      expectedGuests, persistedGuests, reference,
+    });
+    throw new Error("BOOKING_GUEST_COUNT_MISMATCH");
+  }
+
+  const expectedEmail = normalizedEmail(context?.email);
+  const persistedEmail = normalizedEmail(booking?.customer_email);
+  if (expectedEmail && persistedEmail && expectedEmail !== persistedEmail) {
+    console.error("Hermes booking integrity check failed: email mismatch", {
+      expectedEmail, persistedEmail, reference,
+    });
+    throw new Error("BOOKING_EMAIL_MISMATCH");
+  }
+
+  // If booking-create and booking-confirm disagree on references, the confirm response
+  // is authoritative because it represents the persisted booking. This can happen on
+  // an idempotent replay. We reuse the persisted reference rather than exposing a
+  // transient/unpersisted hold reference.
+  if (held?.booking_reference && held.booking_reference !== reference) {
+    console.warn("Hermes booking idempotency replay detected; using persisted reference", {
+      heldReference: held.booking_reference,
+      persistedReference: reference,
+    });
+  }
+
+  return booking;
+}
+
 async function confirmBooking(message, context, slot) {
-  const held = await bookingRequest("/?action=booking-create", {
-    method: "POST",
-    body: JSON.stringify({
-      wa_id: message.from,
-      slot_id: Number(slot.slot_id),
-      guest_count: context.guestCount,
-      customer_name: context.customerName || message.displayName || "",
-      customer_email: context.email,
-      notes: "Created through Gravity Arena conversational booking flow",
-      idempotency_key: message.messageId || "",
-    }),
-  });
-  const confirmed = await bookingRequest("/?action=booking-confirm", {
-    method: "POST",
-    body: JSON.stringify({ booking_reference: held.booking_reference }),
-  });
-  const booking = confirmed.booking || {};
-  const emailSent = confirmed.already_confirmed
-    ? true
-    : await sendConfirmationEmail(booking);
-  return [
-    "✅ Your Gravity Arena booking is confirmed.",
-    `Reference: ${booking.booking_reference || held.booking_reference}`,
-    `Activity: ${booking.activity_name || activityName(context.activityCode)}`,
-    `Date and time: ${booking.starts_at || held.starts_at}`,
-    `Guests: ${booking.guest_count || context.guestCount}`,
-    "",
-    emailSent
-      ? `A confirmation email has been sent to ${booking.customer_email || context.email}.`
-      : "Your booking is confirmed, but I could not send the confirmation email. Your booking reference above is valid.",
-  ].join("\n");
+  const idempotencyKey = bookingIdempotencyKey(message, context, slot);
+
+  try {
+    const held = await bookingRequest("/?action=booking-create", {
+      method: "POST",
+      body: JSON.stringify({
+        wa_id: message.from,
+        slot_id: Number(slot.slot_id),
+        guest_count: context.guestCount,
+        customer_name: context.customerName || message.displayName || "",
+        customer_email: context.email,
+        notes: "Created through Gravity Arena conversational booking flow",
+        idempotency_key: idempotencyKey,
+      }),
+    });
+
+    if (!held?.booking_reference) {
+      console.error("Hermes booking integrity check failed: booking-create returned no reference", {
+        responseKeys: held && typeof held === "object" ? Object.keys(held) : [],
+        idempotencyKey,
+      });
+      return [
+        "I could not safely complete that booking because the booking record could not be verified.",
+        "No confirmation has been issued.",
+        "Please try again in a moment or contact Gravity Arena support.",
+      ].join("\n");
+    }
+
+    const confirmed = await bookingRequest("/?action=booking-confirm", {
+      method: "POST",
+      body: JSON.stringify({ booking_reference: held.booking_reference }),
+    });
+
+    let booking;
+    try {
+      booking = assertPersistedConfirmedBooking(held, confirmed, context, slot);
+    } catch (integrityError) {
+      console.error("Hermes refused to send an unverified booking confirmation", {
+        error: integrityError?.message || String(integrityError),
+        heldReference: held?.booking_reference || null,
+        idempotencyKey,
+      });
+      return [
+        "I could not safely verify that the booking was persisted, so I have not issued a confirmation.",
+        "Please try again in a moment. If the problem continues, a Gravity Arena team member can assist.",
+      ].join("\n");
+    }
+
+    const emailSent = confirmed?.already_confirmed
+      ? true
+      : await sendConfirmationEmail(booking);
+
+    return [
+      "✅ Your Gravity Arena booking is confirmed.",
+      `Reference: ${booking.booking_reference}`,
+      `Activity: ${booking.activity_name || activityName(context.activityCode)}`,
+      `Date and time: ${booking.starts_at}`,
+      `Guests: ${booking.guest_count || context.guestCount}`,
+      "",
+      emailSent
+        ? `A confirmation email has been sent to ${booking.customer_email || context.email}.`
+        : "Your booking is confirmed, but I could not send the confirmation email. Your booking reference above is valid.",
+    ].join("\n");
+  } catch (error) {
+    console.error("Hermes booking create/confirm failed", {
+      error: error?.message || String(error),
+      slotId: slot?.slot_id || null,
+      idempotencyKey,
+    });
+    return [
+      "I could not safely complete the booking right now.",
+      "No new confirmation has been issued.",
+      "Please try again shortly.",
+    ].join("\n");
+  }
 }
 
 export async function handleConversationalBooking(message, history = []) {

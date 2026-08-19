@@ -54,8 +54,16 @@ export default async function handler(req, res) {
 
   try {
     const body = parseBody(req);
-    const waId = String(body.wa_id || "").replace(/\D/g, "");
     const operation = String(body.operation || "status").trim().toLowerCase();
+    const waId = String(body.wa_id || "").replace(/\D/g, "");
+
+    if (operation === "list") {
+      const limit = Math.min(Math.max(Number(body.limit || 50), 1), 100);
+      const result = await memoryRequest(`handover-list&limit=${limit}`, {
+        method: "GET",
+      });
+      return res.status(200).json(result);
+    }
 
     if (!waId) {
       return res.status(422).json({ ok: false, error: "wa_id is required." });
@@ -94,7 +102,7 @@ export default async function handler(req, res) {
 
     return res.status(422).json({
       ok: false,
-      error: "operation must be status, activate or resolve.",
+      error: "operation must be list, status, activate or resolve.",
     });
   } catch (error) {
     console.error("Handover control error", {

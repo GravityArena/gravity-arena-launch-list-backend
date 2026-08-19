@@ -17,11 +17,20 @@ function getMemoryConfig() {
   return baseUrl && apiKey ? { baseUrl, apiKey } : null;
 }
 
-async function memoryRequest(action, options = {}) {
+async function memoryRequest(action, options = {}, params = {}) {
   const config = getMemoryConfig();
   if (!config) throw new Error("Memory API configuration is incomplete.");
 
-  const response = await fetch(`${config.baseUrl}/?action=${encodeURIComponent(action)}`, {
+  const url = new URL(`${config.baseUrl}/`);
+  url.searchParams.set("action", action);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && String(value) !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const response = await fetch(url.toString(), {
     ...options,
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
@@ -32,11 +41,13 @@ async function memoryRequest(action, options = {}) {
   });
 
   const data = await response.json().catch(() => ({}));
+
   if (!response.ok) {
     throw new Error(
       `Memory API failed (${response.status}): ${JSON.stringify(data).slice(0, 500)}`
     );
   }
+
   return data;
 }
 
@@ -59,9 +70,13 @@ export default async function handler(req, res) {
 
     if (operation === "list") {
       const limit = Math.min(Math.max(Number(body.limit || 50), 1), 100);
-      const result = await memoryRequest(`handover-list&limit=${limit}`, {
-        method: "GET",
-      });
+
+      const result = await memoryRequest(
+        "handover-list",
+        { method: "GET" },
+        { limit }
+      );
+
       return res.status(200).json(result);
     }
 
@@ -71,9 +86,11 @@ export default async function handler(req, res) {
 
     if (operation === "status") {
       const result = await memoryRequest(
-        `handover-status&wa_id=${encodeURIComponent(waId)}`,
-        { method: "GET" }
+        "handover-status",
+        { method: "GET" },
+        { wa_id: waId }
       );
+
       return res.status(200).json(result);
     }
 
@@ -86,6 +103,7 @@ export default async function handler(req, res) {
           reason: String(body.reason || "MANUAL").trim().toUpperCase(),
         }),
       });
+
       return res.status(200).json(result);
     }
 
@@ -94,9 +112,12 @@ export default async function handler(req, res) {
         method: "POST",
         body: JSON.stringify({
           wa_id: waId,
-          resolution_note: String(body.resolution_note || "Resolved by staff").trim(),
+          resolution_note: String(
+            body.resolution_note || "Resolved by staff"
+          ).trim(),
         }),
       });
+
       return res.status(200).json(result);
     }
 
@@ -108,6 +129,10 @@ export default async function handler(req, res) {
     console.error("Handover control error", {
       message: error instanceof Error ? error.message : String(error),
     });
-    return res.status(502).json({ ok: false, error: "Handover operation failed." });
+
+    return res.status(502).json({
+      ok: false,
+      error: "Handover operation failed.",
+    });
   }
 }

@@ -608,7 +608,8 @@ export default async function handler(req, res) {
     let processed = 0;
     for (const message of messages) {
       let history = [];
-      let handoverStatus = "AI_ACTIVE";
+      let handoverStatus = "UNKNOWN";
+      let memoryHealthy = false;
 
       try {
         const stored = await saveMemoryMessage({
@@ -619,16 +620,28 @@ export default async function handler(req, res) {
           role: "user",
           body: message.text,
         });
+
         if (stored?.duplicate) {
-          console.log("Duplicate WhatsApp message ignored", { messageId: message.messageId });
+          console.log("Duplicate WhatsApp message ignored", {
+            messageId: message.messageId,
+          });
           continue;
         }
+
         history = (await getMemoryHistory(message.from)) || [];
+
         const statusResult = await getHandoverStatus(message.from);
-        handoverStatus = statusResult?.handover_status || "AI_ACTIVE";
+        handoverStatus = String(
+          statusResult?.handover_status || "UNKNOWN"
+        ).trim().toUpperCase();
+
+        memoryHealthy = true;
       } catch (memoryError) {
-        console.error("Conversation memory read/write warning", {
-          message: memoryError instanceof Error ? memoryError.message : String(memoryError),
+        console.error("Conversation memory / handover status failure", {
+          message: memoryError instanceof Error
+            ? memoryError.message
+            : String(memoryError),
+          senderSuffix: message.from?.slice(-4),
         });
       }
 
@@ -649,28 +662,72 @@ export default async function handler(req, res) {
 
       let reply = null;
       let handover = handoverStatus === "HUMAN_ACTIVE";
-      let aiPaused = handover;
+      let aiPaused = handover || !memoryHealthy || handoverStatus === "UNKNOWN";
       let bookingHandled = false;
 
-      if (requiresHumanHandover(message.text)) {
+      if (!memoryHealthy || handoverStatus === "UNKNOWN") {
+        // Fail closed. If ownership cannot be established, do not invoke Hermes,
+        // booking automation, or any customer-facing AI response.
+        handover = true;
+        aiPaused = true;
+        reply = null;
+
+        console.error("Hermes suppressed because conversation ownership is unknown", {
+          senderSuffix: message.from?.slice(-4),
+          handoverStatus,
+        });
+      } else if (handoverStatus === "HUMAN_ACTIVE") {
+        // Human ownership is authoritative. Persist the inbound message above,
+        // then stay completely silent. No booking skill, no Hermes call and no
+        // automatic waiting message may be sent while staff owns the conversation.
+        handover = true;
+        aiPaused = true;
+        reply = null;
+
+        console.log("Hermes paused for active human handover", {
+          senderSuffix: message.from?.slice(-4),
+          statusReplySent: false,
+        });
+      } else if (requiresHumanHandover(message.text)) {
+        // First explicit request for a human: activate ownership and send one
+        // acknowledgement. Subsequent messages will hit the HUMAN_ACTIVE branch
+        // above and remain silent.
         handover = true;
         aiPaused = true;
         reply = process.env.HUMAN_HANDOVER_REPLY?.trim() ||
           "I have alerted the Gravity Arena team. A team member will contact you as soon as possible. Please share your name, email address and preferred contact time if you have not already done so.";
-        try { await activateHandover(message.from); } catch (error) {
-          console.error("Human handover activation warning", { message: error instanceof Error ? error.message : String(error) });
-        }
+
         try {
-          await sendEscalationEmail({ waId: message.from, displayName: message.displayName, messageText: message.text, history });
+          const activation = await activateHandover(message.from);
+          handoverStatus = String(
+            activation?.handover_status || "HUMAN_ACTIVE"
+          ).trim().toUpperCase();
         } catch (error) {
-          console.error("Human escalation notification warning", { message: error instanceof Error ? error.message : String(error) });
+          // Activation failure must fail closed. Do not send a misleading
+          // acknowledgement if staff ownership was not persisted.
+          reply = null;
+          handoverStatus = "UNKNOWN";
+
+          console.error("Human handover activation failed; AI remains suppressed", {
+            message: error instanceof Error ? error.message : String(error),
+            senderSuffix: message.from?.slice(-4),
+          });
         }
-      } else if (handoverStatus === "HUMAN_ACTIVE") {
-        aiPaused = true;
-        handover = true;
-        reply = process.env.HUMAN_HANDOVER_WAITING_REPLY?.trim() ||
-          "Your conversation is still with the Gravity Arena team. A team member has been notified and will respond as soon as possible. You can continue sending any additional details here.";
-        console.log("Hermes paused for active human handover", { senderSuffix: message.from.slice(-4), statusReplySent: true });
+
+        if (handoverStatus === "HUMAN_ACTIVE") {
+          try {
+            await sendEscalationEmail({
+              waId: message.from,
+              displayName: message.displayName,
+              messageText: message.text,
+              history,
+            });
+          } catch (error) {
+            console.error("Human escalation notification warning", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       } else {
         try {
           const bookingRescheduleReply =
@@ -698,11 +755,6 @@ bookingHandled = Boolean(
   reply
 );
 
-          bookingHandled = Boolean(
-            bookingManagementReply ||
-            conversationalBookingReply ||
-            reply
-          );
         } catch (bookingError) {
           console.error("Booking skill warning", {
             message: bookingError instanceof Error ? bookingError.message : String(bookingError),
@@ -729,9 +781,16 @@ bookingHandled = Boolean(
 
       processed += 1;
       console.log("WhatsApp enquiry processed", {
-        handoverStatus, aiPaused, replySent: Boolean(reply), bookingHandled,
-        messageId: message.messageId, senderSuffix: message.from?.slice(-4),
-        historyMessages: history.length, leadCaptured: Boolean(email), handover,
+        handoverStatus,
+        aiPaused,
+        replySent: Boolean(reply),
+        bookingHandled,
+        messageId: message.messageId,
+        senderSuffix: message.from?.slice(-4),
+        historyMessages: history.length,
+        leadCaptured: Boolean(email),
+        handover,
+        memoryHealthy,
       });
     }
 

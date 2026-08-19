@@ -1,5 +1,5 @@
-// Gravity Arena Hermes Booking Regression Fix R1.4
-// Commit-Path Enforcement & Transaction State Continuity
+// Gravity Arena Hermes Booking Regression Fix R1.5
+// Transaction Continuity + Booking Confirmation Delivery Hardening
 
 const ACTIVITY_ALIASES = [
   { code: "FPV_RACING", name: "FPV Drone Racing", terms: ["fpv", "fpv racing", "drone racing"] },
@@ -341,28 +341,71 @@ async function sendConfirmationEmail(booking) {
   const apiKey=process.env.BREVO_API_KEY?.trim();
   const senderEmail=process.env.BREVO_SENDER_EMAIL?.trim();
   const senderName=process.env.BREVO_SENDER_NAME?.trim()||"Gravity Arena";
-  if (!apiKey || !senderEmail || !booking?.customer_email) return false;
+  const recipientEmail=normalizedEmail(booking?.customer_email);
+  const bookingReference=String(booking?.booking_reference||"").trim();
 
-  const response=await fetch("https://api.brevo.com/v3/smtp/email",{
-    method:"POST",
-    headers:{"api-key":apiKey,accept:"application/json","Content-Type":"application/json"},
-    body:JSON.stringify({
-      sender:{email:senderEmail,name:senderName},
-      to:[{email:booking.customer_email,name:booking.customer_name||"Gravity Arena Customer"}],
-      subject:`Gravity Arena booking confirmed: ${booking.booking_reference}`,
-      textContent:[
-        `Hi ${booking.customer_name||"there"},`,"",
-        "Your Gravity Arena booking is confirmed.",
-        `Reference: ${booking.booking_reference}`,
-        `Activity: ${booking.activity_name}`,
-        `Date and time: ${booking.starts_at}`,
-        `Guests: ${booking.guest_count}`,
-      ].join("\n"),
-      tags:["gravity-arena","booking-confirmation"],
-    }),
-    signal:AbortSignal.timeout(8000),
+  if (!apiKey || !senderEmail || !recipientEmail) {
+    console.error("Booking confirmation email skipped",{
+      bookingReference:bookingReference||null,
+      recipientDomain:recipientEmail.includes("@")?recipientEmail.split("@")[1]:null,
+      brevoConfigured:Boolean(apiKey),
+      senderConfigured:Boolean(senderEmail),
+      recipientPresent:Boolean(recipientEmail),
+    });
+    return {sent:false,reason:"CONFIG_OR_RECIPIENT_MISSING",messageId:null,status:null};
+  }
+
+  let response;
+  try {
+    response=await fetch("https://api.brevo.com/v3/smtp/email",{
+      method:"POST",
+      headers:{"api-key":apiKey,accept:"application/json","Content-Type":"application/json"},
+      body:JSON.stringify({
+        sender:{email:senderEmail,name:senderName},
+        to:[{email:recipientEmail,name:booking.customer_name||"Gravity Arena Customer"}],
+        subject:`Gravity Arena booking confirmed: ${bookingReference}`,
+        textContent:[
+          `Hi ${booking.customer_name||"there"},`,"",
+          "Your Gravity Arena booking is confirmed.",
+          `Reference: ${bookingReference}`,
+          `Activity: ${booking.activity_name}`,
+          `Date and time: ${booking.starts_at}`,
+          `Guests: ${booking.guest_count}`,
+        ].join("\n"),
+        tags:["gravity-arena","booking-confirmation"],
+      }),
+      signal:AbortSignal.timeout(8000),
+    });
+  } catch (error) {
+    console.error("Booking confirmation email request failed",{
+      bookingReference:bookingReference||null,
+      recipientDomain:recipientEmail.split("@")[1]||null,
+      message:error instanceof Error?error.message:String(error),
+    });
+    return {sent:false,reason:"BREVO_REQUEST_FAILED",messageId:null,status:null};
+  }
+
+  const data=await response.json().catch(()=>({}));
+  const messageId=String(data?.messageId||data?.message_id||"").trim()||null;
+
+  if (!response.ok) {
+    console.error("Booking confirmation email failed",{
+      bookingReference:bookingReference||null,
+      recipientDomain:recipientEmail.split("@")[1]||null,
+      status:response.status,
+      error:JSON.stringify(data).slice(0,500),
+    });
+    return {sent:false,reason:"BREVO_REJECTED",messageId,status:response.status};
+  }
+
+  console.log("Booking confirmation email sent",{
+    bookingReference:bookingReference||null,
+    recipientDomain:recipientEmail.split("@")[1]||null,
+    messageId,
+    status:response.status,
   });
-  return response.ok;
+
+  return {sent:true,reason:null,messageId,status:response.status};
 }
 
 function normalizedEmail(value="") {
@@ -423,7 +466,7 @@ async function confirmBooking(message,context,slot) {
         guest_count:context.guestCount,
         customer_name:context.customerName||message.displayName||"",
         customer_email:context.email,
-        notes:"Created through Gravity Arena Hermes R1.4 conversational booking flow",
+        notes:"Created through Gravity Arena Hermes R1.5 conversational booking flow",
         idempotency_key:idempotencyKey,
       }),
     });
@@ -445,7 +488,7 @@ async function confirmBooking(message,context,slot) {
     try {
       booking=assertPersistedConfirmedBooking(held,confirmed,context,slot);
     } catch (error) {
-      console.error("Hermes R1.4 persistence verification failed",{
+      console.error("Hermes R1.5 persistence verification failed",{
         error:error?.message||String(error),
         heldReference:held?.booking_reference||null,
         idempotencyKey,
@@ -456,7 +499,16 @@ async function confirmBooking(message,context,slot) {
       ].join("\n");
     }
 
-    const emailSent=confirmed?.already_confirmed ? true : await sendConfirmationEmail(booking);
+    const emailResult=await sendConfirmationEmail(booking);
+
+    console.log("Hermes booking confirmation delivery R1.5",{
+      bookingReference:booking.booking_reference,
+      alreadyConfirmed:Boolean(confirmed?.already_confirmed),
+      emailSent:Boolean(emailResult?.sent),
+      emailStatus:emailResult?.status??null,
+      emailMessageId:emailResult?.messageId??null,
+      emailReason:emailResult?.reason??null,
+    });
 
     return [
       "✅ Your Gravity Arena booking is confirmed.",
@@ -465,12 +517,12 @@ async function confirmBooking(message,context,slot) {
       `Date and time: ${booking.starts_at}`,
       `Guests: ${booking.guest_count||context.guestCount}`,
       "",
-      emailSent
+      emailResult?.sent
         ? `A confirmation email has been sent to ${booking.customer_email||context.email}.`
-        : "Your booking is confirmed, but I could not send the confirmation email. Your booking reference above is valid.",
+        : "Your booking is confirmed, but the confirmation email could not be sent right now. Your booking reference above is valid.",
     ].join("\n");
   } catch (error) {
-    console.error("Hermes R1.4 booking create/confirm failed",{
+    console.error("Hermes R1.5 booking create/confirm failed",{
       error:error?.message||String(error),
       slotId:slot?.slot_id||null,
       idempotencyKey,
@@ -500,7 +552,7 @@ export async function handleConversationalBooking(message, history = []) {
   if (isAffirmativeBookingReply(text) && !context.active) return null;
   if (!context.active) return null;
 
-  console.log("Hermes booking context R1.4",{
+  console.log("Hermes booking context R1.5",{
     activityCode:context.activityCode,
     date:context.date,
     guestCount:context.guestCount,
@@ -537,7 +589,7 @@ export async function handleConversationalBooking(message, history = []) {
       return `Great — ${String(selectedSlot.starts_at).slice(11,16)} is available for ${context.guestCount} guests. Please send your name and email address for the booking confirmation.`;
     }
 
-    // R1.4 COMMIT GATE:
+    // R1.5 COMMIT GATE:
     // Once the transaction has activity + guest count + date + selected inventory + email,
     // the deterministic booking engine owns the turn. Do not fall through to the LLM.
     return confirmBooking(message,context,selectedSlot);

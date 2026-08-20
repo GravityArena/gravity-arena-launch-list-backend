@@ -6,11 +6,21 @@
     },
     "api/booking-reminders.js": {
       "maxDuration": 30
+    },
+    "api/health.js": {
+      "maxDuration": 20
+    },
+    "api/health-monitor.js": {
+      "maxDuration": 20
     }
   },
   "crons": [
     {
       "path": "/api/booking-reminders",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/health-monitor",
       "schedule": "*/5 * * * *"
     }
   ]

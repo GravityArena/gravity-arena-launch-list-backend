@@ -19,12 +19,20 @@ function getIncidentRegistryConfig() {
   return { url, key };
 }
 
-export async function createIncidentFromHealthEvent(sourceHealthEventId) {
+export async function createIncidentFromHealthEvent(sourceHealthEventId, options = {}) {
   if (!sourceHealthEventId) {
     throw new Error("sourceHealthEventId is required.");
   }
 
   const { url, key } = getIncidentRegistryConfig();
+
+  const acceptanceKey = options.acceptanceTest === true
+    ? process.env.INCIDENT_ACCEPTANCE_TEST_KEY?.trim()
+    : "";
+
+  if (options.acceptanceTest === true && !acceptanceKey) {
+    throw new Error("INCIDENT_ACCEPTANCE_TEST_KEY is not configured.");
+  }
 
   const response = await fetch(url, {
     method: "POST",
@@ -32,6 +40,9 @@ export async function createIncidentFromHealthEvent(sourceHealthEventId) {
       Authorization: `Bearer ${key}`,
       Accept: "application/json",
       "Content-Type": "application/json",
+      ...(acceptanceKey
+        ? { "x-ga-incident-acceptance-key": acceptanceKey }
+        : {}),
     },
     body: JSON.stringify({
       source_health_event_id: sourceHealthEventId,

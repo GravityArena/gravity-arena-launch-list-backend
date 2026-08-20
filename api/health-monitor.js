@@ -31,6 +31,40 @@ function isAuthorized(req) {
   );
 }
 
+
+function getAcceptanceSimulation(req) {
+  const marker = String(req.query?.simulate || "").trim();
+  if (marker !== "ACCEPTANCE_TEST_3E_1_7") return null;
+
+  const expected = process.env.INCIDENT_ACCEPTANCE_TEST_KEY?.trim();
+  const supplied = String(req.headers["x-ga-incident-acceptance-key"] || "").trim();
+
+  if (!expected || !supplied || supplied !== expected) {
+    const error = new Error("Acceptance simulation authorization failed.");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const requested = String(req.query?.status || "DEGRADED").toUpperCase();
+  if (!["DEGRADED", "CRITICAL"].includes(requested)) {
+    const error = new Error("Acceptance simulation status must be DEGRADED or CRITICAL.");
+    error.statusCode = 422;
+    throw error;
+  }
+
+  return {
+    marker,
+    status: requested,
+    checks: {
+      memory: { ok: true, status: "HEALTHY", reason: "acceptance_simulation" },
+      booking: { ok: true, status: "HEALTHY", reason: "acceptance_simulation" },
+      hermes: { ok: true, status: "HEALTHY", reason: "acceptance_simulation" },
+      brevo: { ok: true, status: "HEALTHY", reason: "acceptance_simulation" },
+      whatsapp: { ok: true, status: "HEALTHY", reason: "acceptance_simulation" },
+    },
+  };
+}
+
 function getHealthUrl(req) {
   const explicit = process.env.GA_OS_HEALTH_URL?.trim();
   if (explicit) return explicit;
@@ -229,6 +263,56 @@ export default async function handler(req, res) {
   const checkedAt = new Date().toISOString();
 
   try {
+    const acceptance = getAcceptanceSimulation(req);
+
+    if (acceptance) {
+      const checks = compactChecks(acceptance.checks);
+
+      const registry = await persistHealthEvent({
+        eventType: "SIMULATION",
+        healthStatus: acceptance.status,
+        sourcePhase: PHASE,
+        checks: registryChecks(checks),
+        simulation: true,
+        recordedAt: checkedAt,
+      });
+
+      const incident = await createIncidentFromHealthEvent(
+        registry.eventId,
+        { acceptanceTest: true }
+      );
+
+      console.warn("GA OS controlled incident acceptance simulation", {
+        phase: PHASE,
+        marker: acceptance.marker,
+        simulatedStatus: acceptance.status,
+        registryStored: registry?.stored === true,
+        incidentCreated: incident?.created === true,
+        duplicateSuppressed: incident?.duplicateSuppressed === true,
+        automaticRemediation: false,
+      });
+
+      return res.status(200).json({
+        ok: true,
+        service: SERVICE,
+        phase: PHASE,
+        status: acceptance.status,
+        real_health_status: "NOT_MODIFIED",
+        simulation: true,
+        acceptance_test: acceptance.marker,
+        registry_persisted: registry?.stored === true,
+        source_health_event_id: registry?.eventId || null,
+        incident_attempted: true,
+        incident_created: incident?.created === true,
+        duplicate_suppressed: incident?.duplicateSuppressed === true,
+        incident_id: incident?.incidentId || null,
+        incident_reference: incident?.incidentReference || null,
+        incident_status: incident?.status || null,
+        automatic_remediation: false,
+        checks,
+      });
+    }
+
     const { response, data, latencyMs } = await callHealthEndpoint(req);
     const checks = compactChecks(data?.checks);
 
@@ -347,6 +431,16 @@ export default async function handler(req, res) {
       checks,
     });
   } catch (error) {
+    if (Number.isInteger(error?.statusCode)) {
+      return res.status(error.statusCode).json({
+        ok: false,
+        service: SERVICE,
+        phase: PHASE,
+        error: error instanceof Error ? error.message : String(error),
+        automatic_remediation: false,
+      });
+    }
+
     console.error("GA OS scheduled health monitor failed", {
       phase: PHASE,
       message: error instanceof Error ? error.message : String(error),

@@ -1,16 +1,7 @@
 {
   "crons": [
-    {
-      "path": "/api/booking-reminders",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/health-monitor",
-      "schedule": "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
-    },
-    {
-      "path": "/api/health-alert",
-      "schedule": "4,19,34,49 * * * *"
-    }
+    {"path": "/api/booking-reminders", "schedule": "*/5 * * * *"},
+    {"path": "/api/health-monitor", "schedule": "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"},
+    {"path": "/api/health-alert", "schedule": "4,19,34,49 * * * *"}
   ]
 }

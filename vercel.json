@@ -1,22 +1,4 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/launch-list.js": {
-      "maxDuration": 10
-    },
-    "api/booking-reminders.js": {
-      "maxDuration": 30
-    },
-    "api/health.js": {
-      "maxDuration": 20
-    },
-    "api/health-monitor.js": {
-      "maxDuration": 20
-    },
-    "api/health-alert.js": {
-      "maxDuration": 20
-    }
-  },
   "crons": [
     {
       "path": "/api/booking-reminders",

@@ -1,16 +1,11 @@
 // Gravity Arena GA OS
-// Phase 3E.1.4 - Controlled Operational Alerting
-//
-// Alert-only worker.
-// No automatic remediation.
-// No customer messaging.
-// No booking mutation.
-// No production configuration changes.
+// Phase 3E.1.5 - Controlled Degraded/Critical Alert Validation
 
-const PHASE = "3E.1.4";
+const PHASE = "3E.1.5";
 const SERVICE = "gravity-arena-ga-os-health-alert";
 const HEALTH_TIMEOUT_MS = 12000;
 const BREVO_TIMEOUT_MS = 8000;
+const ALLOWED_SIMULATIONS = new Set(["DEGRADED", "CRITICAL"]);
 
 function isAuthorized(req) {
   const expected = process.env.CRON_SECRET?.trim();
@@ -20,7 +15,6 @@ function isAuthorized(req) {
   const bearer = auth.toLowerCase().startsWith("bearer ")
     ? auth.slice(7).trim()
     : "";
-
   const direct = String(req.headers["x-api-key"] || "").trim();
 
   return Boolean(
@@ -29,14 +23,22 @@ function isAuthorized(req) {
   );
 }
 
+function getSimulationState(req) {
+  const raw = String(req.query?.simulate || "").trim().toUpperCase();
+  return ALLOWED_SIMULATIONS.has(raw) ? raw : null;
+}
+
+function isSimulationAuthorized(req) {
+  const expected = process.env.HEALTH_ALERT_TEST_KEY?.trim();
+  const supplied = String(req.headers["x-ga-alert-test-key"] || "").trim();
+  return Boolean(expected && supplied && supplied === expected);
+}
+
 function getHealthUrl(req) {
   const explicit = process.env.GA_OS_HEALTH_URL?.trim();
   if (explicit) return explicit;
 
-  const host = String(
-    req.headers["x-forwarded-host"] || req.headers.host || ""
-  ).trim();
-
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
   if (!host) throw new Error("Health alert host is unavailable.");
 
   const proto = String(req.headers["x-forwarded-proto"] || "https").trim();
@@ -55,8 +57,7 @@ function getAlertRecipient() {
 function getBrevoConfig() {
   const apiKey = process.env.BREVO_API_KEY?.trim();
   const senderEmail = process.env.BREVO_SENDER_EMAIL?.trim();
-  const senderName =
-    process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena GA OS";
+  const senderName = process.env.BREVO_SENDER_NAME?.trim() || "Gravity Arena GA OS";
 
   if (!apiKey || !senderEmail) {
     throw new Error("Brevo alert configuration is incomplete.");
@@ -67,9 +68,7 @@ function getBrevoConfig() {
 
 async function callHealth(req) {
   const probeKey = process.env.HEALTH_PROBE_KEY?.trim();
-  if (!probeKey) {
-    throw new Error("HEALTH_PROBE_KEY is not configured.");
-  }
+  if (!probeKey) throw new Error("HEALTH_PROBE_KEY is not configured.");
 
   const started = Date.now();
 
@@ -98,14 +97,12 @@ function compactChecks(checks = {}) {
       {
         status: String(check?.status || "UNKNOWN"),
         reason: String(check?.reason || "unknown"),
-        latency_ms:
-          Number.isFinite(Number(check?.latency_ms))
-            ? Number(check.latency_ms)
-            : null,
-        http_status:
-          Number.isFinite(Number(check?.http_status))
-            ? Number(check.http_status)
-            : null,
+        latency_ms: Number.isFinite(Number(check?.latency_ms))
+          ? Number(check.latency_ms)
+          : null,
+        http_status: Number.isFinite(Number(check?.http_status))
+          ? Number(check.http_status)
+          : null,
       },
     ])
   );
@@ -118,25 +115,48 @@ function failingChecks(checks = {}) {
       name,
       status: String(check?.status || "UNKNOWN"),
       reason: String(check?.reason || "unknown"),
-      http_status:
-        Number.isFinite(Number(check?.http_status))
-          ? Number(check.http_status)
-          : null,
-      latency_ms:
-        Number.isFinite(Number(check?.latency_ms))
-          ? Number(check.latency_ms)
-          : null,
+      http_status: Number.isFinite(Number(check?.http_status))
+        ? Number(check.http_status)
+        : null,
+      latency_ms: Number.isFinite(Number(check?.latency_ms))
+        ? Number(check.latency_ms)
+        : null,
     }));
 }
 
-async function sendAlertEmail({ recipient, healthStatus, healthHttpStatus, checks, checkedAt }) {
+function buildSimulatedChecks(realChecks, simulatedState) {
+  return {
+    ...realChecks,
+    simulation: {
+      status: simulatedState,
+      reason: "controlled_alert_validation",
+      latency_ms: 0,
+      http_status: null,
+    },
+  };
+}
+
+async function sendAlertEmail({
+  recipient,
+  healthStatus,
+  healthHttpStatus,
+  checks,
+  checkedAt,
+  simulation = false,
+}) {
   const { apiKey, senderEmail, senderName } = getBrevoConfig();
   const failed = failingChecks(checks);
 
-  const subject = `[GA OS ${healthStatus}] Production health alert`;
+  const subject = simulation
+    ? `[GA OS ${healthStatus}] [SIMULATION] Production health alert`
+    : `[GA OS ${healthStatus}] Production health alert`;
 
   const lines = [
-    `Gravity Arena GA OS production health status: ${healthStatus}`,
+    simulation
+      ? "SIMULATION ONLY - No production dependency has been changed."
+      : "Gravity Arena GA OS production alert.",
+    "",
+    `Gravity Arena GA OS health status: ${healthStatus}`,
     `Phase: ${PHASE}`,
     `Checked at: ${checkedAt}`,
     `Health endpoint HTTP status: ${healthHttpStatus}`,
@@ -157,7 +177,9 @@ async function sendAlertEmail({ recipient, healthStatus, healthHttpStatus, check
   lines.push(
     "",
     "Action required:",
-    "Review Vercel logs and the affected upstream service.",
+    simulation
+      ? "Validation only. No incident response is required."
+      : "Review Vercel logs and the affected upstream service.",
     "No automatic remediation has been performed.",
     "",
     "Gravity Arena GA OS"
@@ -171,19 +193,13 @@ async function sendAlertEmail({ recipient, healthStatus, healthHttpStatus, check
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      sender: {
-        email: senderEmail,
-        name: senderName,
-      },
-      to: [
-        {
-          email: recipient,
-          name: "Gravity Arena Operations",
-        },
-      ],
+      sender: { email: senderEmail, name: senderName },
+      to: [{ email: recipient, name: "Gravity Arena Operations" }],
       subject,
       textContent: lines.join("\n"),
-      tags: ["gravity-arena", "ga-os", "health-alert"],
+      tags: simulation
+        ? ["gravity-arena", "ga-os", "health-alert", "simulation"]
+        : ["gravity-arena", "ga-os", "health-alert"],
     }),
     signal: AbortSignal.timeout(BREVO_TIMEOUT_MS),
   });
@@ -224,30 +240,47 @@ export default async function handler(req, res) {
     });
   }
 
+  const simulatedState = getSimulationState(req);
+
+  if (simulatedState && !isSimulationAuthorized(req)) {
+    return res.status(403).json({
+      ok: false,
+      service: SERVICE,
+      phase: PHASE,
+      error: "Simulation authorization failed.",
+    });
+  }
+
   const started = Date.now();
   const checkedAt = new Date().toISOString();
 
   try {
     const { response, data, latencyMs } = await callHealth(req);
 
-    const healthStatus = String(
+    const realHealthStatus = String(
       data?.status || (response.ok ? "HEALTHY" : "UNKNOWN")
     ).toUpperCase();
 
-    const checks = compactChecks(data?.checks);
+    const realChecks = compactChecks(data?.checks);
+    const healthStatus = simulatedState || realHealthStatus;
+    const checks = simulatedState
+      ? buildSimulatedChecks(realChecks, simulatedState)
+      : realChecks;
 
     const healthy =
+      !simulatedState &&
       response.status === 200 &&
       data?.ok === true &&
-      healthStatus === "HEALTHY";
+      realHealthStatus === "HEALTHY";
 
     if (healthy) {
       console.log("GA OS operational alert check healthy", {
         phase: PHASE,
-        healthStatus,
+        healthStatus: realHealthStatus,
         healthHttpStatus: response.status,
         healthLatencyMs: latencyMs,
         alertSent: false,
+        simulation: false,
         automaticRemediation: false,
       });
 
@@ -257,6 +290,7 @@ export default async function handler(req, res) {
         phase: PHASE,
         status: "HEALTHY",
         alert_sent: false,
+        simulation: false,
         checked_at: checkedAt,
         duration_ms: Date.now() - started,
         automatic_remediation: false,
@@ -266,20 +300,13 @@ export default async function handler(req, res) {
     const recipient = getAlertRecipient();
 
     if (!recipient) {
-      console.error("GA OS operational alert recipient unavailable", {
-        phase: PHASE,
-        healthStatus,
-        healthHttpStatus: response.status,
-        checks,
-        automaticRemediation: false,
-      });
-
       return res.status(503).json({
         ok: false,
         service: SERVICE,
         phase: PHASE,
         status: healthStatus === "CRITICAL" ? "CRITICAL" : "DEGRADED",
         alert_sent: false,
+        simulation: Boolean(simulatedState),
         error: "Operational alert recipient is not configured.",
         checked_at: checkedAt,
         automatic_remediation: false,
@@ -292,28 +319,36 @@ export default async function handler(req, res) {
       healthHttpStatus: response.status,
       checks,
       checkedAt,
+      simulation: Boolean(simulatedState),
     });
 
-    console.error("GA OS operational health alert sent", {
-      phase: PHASE,
-      healthStatus,
-      healthHttpStatus: response.status,
-      healthLatencyMs: latencyMs,
-      alertSent: true,
-      deliveryStatus: delivery.status,
-      deliveryMessageIdPresent: Boolean(delivery.messageId),
-      failedChecks: failingChecks(checks),
-      automaticRemediation: false,
-    });
+    console.error(
+      simulatedState
+        ? "GA OS controlled health alert simulation sent"
+        : "GA OS operational health alert sent",
+      {
+        phase: PHASE,
+        healthStatus,
+        realHealthStatus,
+        healthHttpStatus: response.status,
+        healthLatencyMs: latencyMs,
+        alertSent: true,
+        simulation: Boolean(simulatedState),
+        deliveryStatus: delivery.status,
+        deliveryMessageIdPresent: Boolean(delivery.messageId),
+        failedChecks: failingChecks(checks),
+        automaticRemediation: false,
+      }
+    );
 
-    // The alert worker itself completed successfully, so return 200.
-    // The unhealthy production state remains explicit in `status`.
     return res.status(200).json({
       ok: true,
       service: SERVICE,
       phase: PHASE,
       status: healthStatus === "CRITICAL" ? "CRITICAL" : "DEGRADED",
+      real_health_status: realHealthStatus,
       alert_sent: true,
+      simulation: Boolean(simulatedState),
       checked_at: checkedAt,
       duration_ms: Date.now() - started,
       automatic_remediation: false,
@@ -333,6 +368,7 @@ export default async function handler(req, res) {
       phase: PHASE,
       status: "CRITICAL",
       alert_sent: false,
+      simulation: Boolean(simulatedState),
       error: "Operational alert worker failed.",
       checked_at: checkedAt,
       duration_ms: Date.now() - started,

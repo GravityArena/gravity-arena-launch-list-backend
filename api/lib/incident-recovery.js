@@ -49,6 +49,8 @@ export async function correlateRecoveryEvent(recoveryHealthEventId) {
     correlated: data?.correlated === true,
     duplicateSuppressed: data?.duplicate_suppressed === true,
     reason: data?.reason || null,
+    recoveryLinkId:
+      data?.recovery_link_id || data?.link?.recovery_link_id || null,
     incidentIdPresent: Boolean(data?.incident_id || data?.link?.incident_id),
     incidentReferencePresent: Boolean(data?.incident_reference),
     dependency: data?.dependency || data?.link?.dependency || null,

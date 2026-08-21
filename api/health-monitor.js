@@ -1,6 +1,5 @@
 // Gravity Arena GA OS
 // Phase 3E.1.7B - Health Monitoring + Automatic Incident Creation
-// Phase 3E.1.9B-3A enhancement: persist sanitized dependency diagnostics
 
 import {
   persistHealthEvent,
@@ -10,6 +9,10 @@ import {
 import {
   createIncidentFromHealthEvent,
 } from "./lib/incident-registry.js";
+
+import {
+  correlateRecoveryEvent,
+} from "./lib/incident-recovery.js";
 
 const PHASE = "3E.1.7B";
 const SERVICE = "gravity-arena-ga-os-health-monitor";
@@ -95,16 +98,7 @@ function registryChecks(checks = {}) {
   return Object.fromEntries(
     Object.entries(checks).map(([name, check]) => [
       name,
-      {
-        status: String(check?.status || "UNKNOWN"),
-        reason: String(check?.reason || "unknown").slice(0, 120),
-        latency_ms: Number.isFinite(Number(check?.latencyMs))
-          ? Math.max(0, Math.round(Number(check.latencyMs)))
-          : null,
-        http_status: Number.isFinite(Number(check?.httpStatus))
-          ? Math.max(0, Math.round(Number(check.httpStatus)))
-          : null,
-      },
+      { status: String(check?.status || "UNKNOWN") },
     ])
   );
 }
@@ -176,6 +170,39 @@ async function persistMonitorState({
     checks: registryChecks(checks),
     recordedAt,
   });
+}
+
+async function maybeCorrelateRecovery({
+  registryResult,
+}) {
+  if (
+    registryResult?.stored !== true ||
+    registryResult?.eventType !== "RECOVERY" ||
+    !registryResult?.eventId
+  ) {
+    return {
+      attempted: false,
+      correlated: false,
+      reason: registryResult?.reason || "recovery_event_not_persisted",
+    };
+  }
+
+  const result = await correlateRecoveryEvent(registryResult.eventId);
+
+  return {
+    attempted: true,
+    correlated: result.correlated,
+    duplicateSuppressed: result.duplicateSuppressed,
+    reason: result.reason,
+    incidentIdPresent: result.incidentIdPresent,
+    incidentReferencePresent: result.incidentReferencePresent,
+    dependency: result.dependency,
+    observedDurationSeconds: result.observedDurationSeconds,
+    notificationSent: false,
+    incidentClosed: false,
+    lifecycleChanged: false,
+    automaticRemediation: false,
+  };
 }
 
 async function maybeCreateIncident({
@@ -276,6 +303,27 @@ export default async function handler(req, res) {
       };
     }
 
+    let recovery = null;
+
+    try {
+      recovery = await maybeCorrelateRecovery({
+        registryResult: registry,
+      });
+    } catch (error) {
+      console.error("GA OS recovery correlation failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        healthEventIdPresent: Boolean(registry?.eventId),
+        automaticRemediation: false,
+      });
+
+      recovery = {
+        attempted: true,
+        correlated: false,
+        reason: "recovery_correlation_failed",
+      };
+    }
+
     let incident = null;
 
     try {
@@ -313,6 +361,18 @@ export default async function handler(req, res) {
       incidentIdPresent: incident?.incidentIdPresent === true,
       incidentReferencePresent: incident?.incidentReferencePresent === true,
       incidentReason: incident?.reason || null,
+      recoveryAttempted: recovery?.attempted === true,
+      recoveryCorrelated: recovery?.correlated === true,
+      recoveryDuplicateSuppressed: recovery?.duplicateSuppressed === true,
+      recoveryReason: recovery?.reason || null,
+      recoveryIncidentIdPresent: recovery?.incidentIdPresent === true,
+      recoveryDependency: recovery?.dependency || null,
+      recoveryObservedDurationSeconds:
+        Number.isFinite(Number(recovery?.observedDurationSeconds))
+          ? Number(recovery.observedDurationSeconds)
+          : null,
+      recoveryNotificationSent: false,
+      incidentAutoClosed: false,
       checks,
       automaticRemediation: false,
     };
@@ -332,6 +392,18 @@ export default async function handler(req, res) {
         registry_reason: registry?.reason || null,
         incident_attempted: false,
         incident_created: false,
+        recovery_attempted: recovery?.attempted === true,
+        recovery_correlated: recovery?.correlated === true,
+        recovery_duplicate_suppressed: recovery?.duplicateSuppressed === true,
+        recovery_reason: recovery?.reason || null,
+        recovery_incident_id_present: recovery?.incidentIdPresent === true,
+        recovery_dependency: recovery?.dependency || null,
+        recovery_observed_duration_seconds:
+          Number.isFinite(Number(recovery?.observedDurationSeconds))
+            ? Number(recovery.observedDurationSeconds)
+            : null,
+        recovery_notification_sent: false,
+        incident_auto_closed: false,
         automatic_remediation: false,
         checks,
       });
@@ -353,6 +425,18 @@ export default async function handler(req, res) {
       incident_created: incident?.created === true,
       duplicate_suppressed: incident?.duplicateSuppressed === true,
       incident_status: incident?.status || null,
+      recovery_attempted: recovery?.attempted === true,
+      recovery_correlated: recovery?.correlated === true,
+      recovery_duplicate_suppressed: recovery?.duplicateSuppressed === true,
+      recovery_reason: recovery?.reason || null,
+      recovery_incident_id_present: recovery?.incidentIdPresent === true,
+      recovery_dependency: recovery?.dependency || null,
+      recovery_observed_duration_seconds:
+        Number.isFinite(Number(recovery?.observedDurationSeconds))
+          ? Number(recovery.observedDurationSeconds)
+          : null,
+      recovery_notification_sent: false,
+      incident_auto_closed: false,
       automatic_remediation: false,
       checks,
     });

@@ -1,5 +1,6 @@
 // Gravity Arena GA OS
 // Phase 3E.1.7B - Health Event Registry Client
+// Phase 3E.1.9B-3A enhancement: retain sanitized dependency diagnostics
 //
 // Sanitized persistence only.
 // No customer PII.
@@ -19,13 +20,32 @@ function getRegistryConfig() {
   return { url, key };
 }
 
+function sanitizeStatus(value) {
+  const status = String(value || "UNKNOWN").toUpperCase();
+  return ["HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"].includes(status)
+    ? status
+    : "UNKNOWN";
+}
+
+function sanitizeReason(value) {
+  const reason = String(value || "unknown")
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+  return reason || "unknown";
+}
+
+function sanitizeNullableInteger(value) {
+  const number = Number(value);
+
+  return Number.isFinite(number) && number >= 0
+    ? Math.round(number)
+    : null;
+}
+
 export function sanitizeDependencyStatuses(checks = {}) {
-  const value = (name) => {
-    const status = String(checks?.[name]?.status || "UNKNOWN").toUpperCase();
-    return ["HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"].includes(status)
-      ? status
-      : "UNKNOWN";
-  };
+  const value = (name) => sanitizeStatus(checks?.[name]?.status);
 
   return {
     memory_status: value("memory"),
@@ -34,6 +54,22 @@ export function sanitizeDependencyStatuses(checks = {}) {
     brevo_status: value("brevo"),
     whatsapp_status: value("whatsapp"),
   };
+}
+
+export function sanitizeDependencyDiagnostics(checks = {}) {
+  const supported = ["memory", "booking", "hermes", "brevo", "whatsapp"];
+
+  return Object.fromEntries(
+    supported.map((name) => [
+      name,
+      {
+        status: sanitizeStatus(checks?.[name]?.status),
+        reason: sanitizeReason(checks?.[name]?.reason),
+        http_status: sanitizeNullableInteger(checks?.[name]?.http_status),
+        latency_ms: sanitizeNullableInteger(checks?.[name]?.latency_ms),
+      },
+    ])
+  );
 }
 
 export async function readLatestHealthEvent() {
@@ -72,12 +108,14 @@ export async function persistHealthEvent({
 }) {
   const { url, key } = getRegistryConfig();
   const statuses = sanitizeDependencyStatuses(checks);
+  const diagnostics = sanitizeDependencyDiagnostics(checks);
 
   const body = {
     event_type: eventType,
     health_status: healthStatus,
     source_phase: sourcePhase,
     ...statuses,
+    checks: diagnostics,
     alert_sent: Boolean(alertSent),
     simulation: Boolean(simulation),
     automatic_remediation: false,

@@ -14,6 +14,10 @@ import {
   correlateRecoveryEvent,
 } from "./lib/incident-recovery.js";
 
+import {
+  sendRecoveryNotification,
+} from "./lib/incident-recovery-notification.js";
+
 const PHASE = "3E.1.7B";
 const SERVICE = "gravity-arena-ga-os-health-monitor";
 const HEALTH_TIMEOUT_MS = 12000;
@@ -193,6 +197,7 @@ async function maybeCorrelateRecovery({
     attempted: true,
     correlated: result.correlated,
     duplicateSuppressed: result.duplicateSuppressed,
+    recoveryLinkId: result.recoveryLinkId,
     reason: result.reason,
     incidentIdPresent: result.incidentIdPresent,
     incidentReferencePresent: result.incidentReferencePresent,
@@ -324,6 +329,33 @@ export default async function handler(req, res) {
       };
     }
 
+    let recoveryNotification = null;
+
+    if (recovery?.correlated === true && recovery?.recoveryLinkId) {
+      try {
+        recoveryNotification = await sendRecoveryNotification(
+          recovery.recoveryLinkId
+        );
+      } catch (error) {
+        console.error("GA OS recovery notification failed", {
+          phase: PHASE,
+          message: error instanceof Error ? error.message : String(error),
+          recoveryLinkIdPresent: Boolean(recovery?.recoveryLinkId),
+          automaticRemediation: false,
+        });
+
+        recoveryNotification = {
+          notification: "FAILED",
+          notificationIdPresent: false,
+          providerMessageIdPresent: false,
+          pendingEscalationsSuppressed: 0,
+          lifecycleChanged: false,
+          incidentClosed: false,
+          automaticRemediation: false,
+        };
+      }
+    }
+
     let incident = null;
 
     try {
@@ -371,7 +403,16 @@ export default async function handler(req, res) {
         Number.isFinite(Number(recovery?.observedDurationSeconds))
           ? Number(recovery.observedDurationSeconds)
           : null,
-      recoveryNotificationSent: false,
+      recoveryNotification:
+        recoveryNotification?.notification || null,
+      recoveryNotificationSent:
+        recoveryNotification?.notification === "SENT",
+      recoveryNotificationIdPresent:
+        recoveryNotification?.notificationIdPresent === true,
+      recoveryProviderMessageIdPresent:
+        recoveryNotification?.providerMessageIdPresent === true,
+      pendingEscalationsSuppressed:
+        Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
       incidentAutoClosed: false,
       checks,
       automaticRemediation: false,
@@ -402,7 +443,16 @@ export default async function handler(req, res) {
           Number.isFinite(Number(recovery?.observedDurationSeconds))
             ? Number(recovery.observedDurationSeconds)
             : null,
-        recovery_notification_sent: false,
+        recovery_notification:
+          recoveryNotification?.notification || null,
+        recovery_notification_sent:
+          recoveryNotification?.notification === "SENT",
+        recovery_notification_id_present:
+          recoveryNotification?.notificationIdPresent === true,
+        recovery_provider_message_id_present:
+          recoveryNotification?.providerMessageIdPresent === true,
+        pending_escalations_suppressed:
+          Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
         incident_auto_closed: false,
         automatic_remediation: false,
         checks,
@@ -435,7 +485,16 @@ export default async function handler(req, res) {
         Number.isFinite(Number(recovery?.observedDurationSeconds))
           ? Number(recovery.observedDurationSeconds)
           : null,
-      recovery_notification_sent: false,
+      recovery_notification:
+        recoveryNotification?.notification || null,
+      recovery_notification_sent:
+        recoveryNotification?.notification === "SENT",
+      recovery_notification_id_present:
+        recoveryNotification?.notificationIdPresent === true,
+      recovery_provider_message_id_present:
+        recoveryNotification?.providerMessageIdPresent === true,
+      pending_escalations_suppressed:
+        Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
       incident_auto_closed: false,
       automatic_remediation: false,
       checks,

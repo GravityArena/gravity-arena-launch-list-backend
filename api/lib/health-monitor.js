@@ -1,0 +1,577 @@
+// Gravity Arena GA OS
+// Phase 3E.1.7B - Health Monitoring + Automatic Incident Creation
+import {
+  observeRecoveryState,
+} from "./lib/recovery-confirmation.js";
+
+import {
+  persistHealthEvent,
+  readLatestHealthEvent,
+} from "./lib/health-registry.js";
+
+import {
+  createIncidentFromHealthEvent,
+} from "./lib/incident-registry.js";
+
+import {
+  correlateRecoveryEvent,
+} from "./lib/incident-recovery.js";
+
+import {
+  sendRecoveryNotification,
+} from "./lib/incident-recovery-notification.js";
+
+const PHASE = "3E.1.7B";
+const SERVICE = "gravity-arena-ga-os-health-monitor";
+const HEALTH_TIMEOUT_MS = 12000;
+
+function isAuthorized(req) {
+  const expected = process.env.CRON_SECRET?.trim();
+  if (!expected) return false;
+
+  const auth = String(req.headers.authorization || "").trim();
+  const bearer = auth.toLowerCase().startsWith("bearer ")
+    ? auth.slice(7).trim()
+    : "";
+
+  const direct = String(req.headers["x-api-key"] || "").trim();
+
+  return Boolean(
+    (bearer && bearer === expected) ||
+    (direct && direct === expected)
+  );
+}
+
+function getHealthUrl(req) {
+  const explicit = process.env.GA_OS_HEALTH_URL?.trim();
+  if (explicit) return explicit;
+
+  const host = String(
+    req.headers["x-forwarded-host"] || req.headers.host || ""
+  ).trim();
+
+  if (!host) throw new Error("Health monitor host is unavailable.");
+
+  const proto = String(req.headers["x-forwarded-proto"] || "https").trim();
+  return `${proto}://${host}/api/health`;
+}
+
+async function callHealthEndpoint(req) {
+  const probeKey = process.env.HEALTH_PROBE_KEY?.trim();
+  if (!probeKey) {
+    throw new Error("HEALTH_PROBE_KEY is not configured.");
+  }
+
+  const started = Date.now();
+
+  const response = await fetch(getHealthUrl(req), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${probeKey}`,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  return {
+    response,
+    data,
+    latencyMs: Date.now() - started,
+  };
+}
+
+function compactChecks(checks = {}) {
+  return Object.fromEntries(
+    Object.entries(checks).map(([name, check]) => [
+      name,
+      {
+        ok: check?.ok === true,
+        status: String(check?.status || "UNKNOWN"),
+        reason: String(check?.reason || "unknown"),
+        latencyMs: Number.isFinite(Number(check?.latency_ms))
+          ? Number(check.latency_ms)
+          : null,
+        httpStatus: Number.isFinite(Number(check?.http_status))
+          ? Number(check.http_status)
+          : null,
+      },
+    ])
+  );
+}
+
+function registryChecks(checks = {}) {
+  return Object.fromEntries(
+    Object.entries(checks).map(([name, check]) => [
+      name,
+      { status: String(check?.status || "UNKNOWN") },
+    ])
+  );
+}
+
+function isScheduledHealthySnapshotTime(date = new Date()) {
+  const minute = date.getUTCMinutes();
+  return minute === 2 || minute === 32;
+}
+
+async function persistMonitorState({
+  healthStatus,
+  checks,
+  recordedAt,
+}) {
+  let latest = null;
+
+  try {
+    latest = await readLatestHealthEvent();
+  } catch (error) {
+    console.error("GA OS health registry latest-event read failed", {
+      phase: PHASE,
+      message: error instanceof Error ? error.message : String(error),
+      automaticRemediation: false,
+    });
+  }
+
+  const previousStatus = String(latest?.health_status || "").toUpperCase();
+
+  if (healthStatus === "HEALTHY") {
+    if (previousStatus && previousStatus !== "HEALTHY") {
+      return persistHealthEvent({
+        eventType: "RECOVERY",
+        healthStatus: "HEALTHY",
+        sourcePhase: PHASE,
+        checks: registryChecks(checks),
+        recordedAt,
+      });
+    }
+
+    if (isScheduledHealthySnapshotTime(new Date(recordedAt))) {
+      return persistHealthEvent({
+        eventType: "HEALTH_SNAPSHOT",
+        healthStatus: "HEALTHY",
+        sourcePhase: PHASE,
+        checks: registryChecks(checks),
+        recordedAt,
+      });
+    }
+
+    return { stored: false, reason: "healthy_snapshot_not_due" };
+  }
+
+  const eventType =
+    healthStatus === "CRITICAL" ? "CRITICAL" : "DEGRADED";
+
+  if (
+    latest &&
+    String(latest.event_type || "").toUpperCase() === eventType &&
+    previousStatus === healthStatus &&
+    latest.simulation !== true
+  ) {
+    return { stored: false, reason: "unchanged_unhealthy_state" };
+  }
+
+  return persistHealthEvent({
+    eventType,
+    healthStatus,
+    sourcePhase: PHASE,
+    checks: registryChecks(checks),
+    recordedAt,
+  });
+}
+
+async function maybeCorrelateRecovery({
+  registryResult,
+}) {
+  if (
+    registryResult?.stored !== true ||
+    registryResult?.eventType !== "RECOVERY" ||
+    !registryResult?.eventId
+  ) {
+    return {
+      attempted: false,
+      correlated: false,
+      reason: registryResult?.reason || "recovery_event_not_persisted",
+    };
+  }
+
+  const result = await correlateRecoveryEvent(registryResult.eventId);
+
+  return {
+    attempted: true,
+    correlated: result.correlated,
+    duplicateSuppressed: result.duplicateSuppressed,
+    recoveryLinkId: result.recoveryLinkId,
+    reason: result.reason,
+    incidentIdPresent: result.incidentIdPresent,
+    incidentReferencePresent: result.incidentReferencePresent,
+    dependency: result.dependency,
+    observedDurationSeconds: result.observedDurationSeconds,
+    notificationSent: false,
+    incidentClosed: false,
+    lifecycleChanged: false,
+    automaticRemediation: false,
+  };
+}
+
+async function maybeCreateIncident({
+  healthStatus,
+  registryResult,
+}) {
+  if (!["DEGRADED", "CRITICAL"].includes(healthStatus)) {
+    return {
+      attempted: false,
+      created: false,
+      reason: "healthy_state",
+    };
+  }
+
+  if (registryResult?.stored !== true || !registryResult?.eventId) {
+    return {
+      attempted: false,
+      created: false,
+      reason: registryResult?.reason || "health_event_not_persisted",
+    };
+  }
+
+  const result = await createIncidentFromHealthEvent(registryResult.eventId);
+
+  return {
+    attempted: true,
+    created: result.created,
+    duplicateSuppressed: result.duplicateSuppressed,
+    incidentIdPresent: Boolean(result.incidentId),
+    incidentReferencePresent: Boolean(result.incidentReference),
+    status: result.status,
+    automaticRemediation: false,
+  };
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.setHeader("Allow", "GET");
+
+  if (req.method !== "GET") {
+    return res.status(405).json({
+      ok: false,
+      service: SERVICE,
+      phase: PHASE,
+      error: "Method not allowed.",
+    });
+  }
+
+  if (!isAuthorized(req)) {
+    return res.status(401).json({
+      ok: false,
+      service: SERVICE,
+      phase: PHASE,
+      error: "Unauthorized.",
+    });
+  }
+
+  const started = Date.now();
+  const checkedAt = new Date().toISOString();
+
+  try {
+    const { response, data, latencyMs } = await callHealthEndpoint(req);
+    const checks = compactChecks(data?.checks);
+
+    const rawStatus =
+      String(data?.status || "").toUpperCase() ||
+      (response.ok ? "HEALTHY" : "UNKNOWN");
+
+    const effectiveStatus =
+      response.status === 200 &&
+      data?.ok === true &&
+      rawStatus === "HEALTHY"
+        ? "HEALTHY"
+        : rawStatus === "CRITICAL"
+          ? "CRITICAL"
+          : "DEGRADED";
+
+    let registry = null;
+
+    try {
+      registry = await persistMonitorState({
+        healthStatus: effectiveStatus,
+        checks,
+        recordedAt: checkedAt,
+      });
+    } catch (error) {
+      console.error("GA OS health registry persistence failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        automaticRemediation: false,
+      });
+
+      registry = {
+        stored: false,
+        reason: "registry_write_failed",
+      };
+    }
+
+    let recovery = null;
+
+    try {
+      recovery = await maybeCorrelateRecovery({
+        registryResult: registry,
+      });
+    } catch (error) {
+      console.error("GA OS recovery correlation failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        healthEventIdPresent: Boolean(registry?.eventId),
+        automaticRemediation: false,
+      });
+
+      recovery = {
+        attempted: true,
+        correlated: false,
+        reason: "recovery_correlation_failed",
+      };
+    }
+
+    let recoveryNotification = null;
+
+    if (recovery?.correlated === true && recovery?.recoveryLinkId) {
+      try {
+        recoveryNotification = await sendRecoveryNotification(
+          recovery.recoveryLinkId
+        );
+      } catch (error) {
+        console.error("GA OS recovery notification failed", {
+          phase: PHASE,
+          message: error instanceof Error ? error.message : String(error),
+          recoveryLinkIdPresent: Boolean(recovery?.recoveryLinkId),
+          automaticRemediation: false,
+        });
+
+        recoveryNotification = {
+          notification: "FAILED",
+          notificationIdPresent: false,
+          providerMessageIdPresent: false,
+          pendingEscalationsSuppressed: 0,
+          lifecycleChanged: false,
+          incidentClosed: false,
+          automaticRemediation: false,
+        };
+      }
+    }
+
+    let incident = null;
+
+    try {
+      incident = await maybeCreateIncident({
+        healthStatus: effectiveStatus,
+        registryResult: registry,
+      });
+    } catch (error) {
+      console.error("GA OS automatic incident creation failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        healthEventIdPresent: Boolean(registry?.eventId),
+        automaticRemediation: false,
+      });
+
+      incident = {
+        attempted: true,
+        created: false,
+        reason: "incident_create_failed",
+      };
+    }
+
+    let confirmedRecovery = {
+      attempted: false,
+      reason: "not_attempted",
+      resolvedCount: 0,
+      pendingEscalationsSuppressed: 0,
+      automaticRemediation: false,
+    };
+
+    try {
+      confirmedRecovery = await observeRecoveryState({
+        checks,
+        healthEventId:
+          registry?.stored === true && registry?.eventId
+            ? registry.eventId
+            : null,
+      });
+    } catch (error) {
+      console.error("GA OS confirmed recovery worker failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        automaticRemediation: false,
+      });
+
+      confirmedRecovery = {
+        attempted: true,
+        reason: "recovery_confirmation_failed",
+        resolvedCount: 0,
+        pendingEscalationsSuppressed: 0,
+        automaticRemediation: false,
+      };
+    }
+
+    const log = {
+      phase: PHASE,
+      monitoredPhase: data?.phase || null,
+      status: effectiveStatus,
+      healthHttpStatus: response.status,
+      healthLatencyMs: latencyMs,
+      totalDurationMs: Date.now() - started,
+      registryStored: registry?.stored === true,
+      registryReason: registry?.reason || null,
+      incidentAttempted: incident?.attempted === true,
+      incidentCreated: incident?.created === true,
+      duplicateSuppressed: incident?.duplicateSuppressed === true,
+      incidentIdPresent: incident?.incidentIdPresent === true,
+      incidentReferencePresent: incident?.incidentReferencePresent === true,
+      incidentReason: incident?.reason || null,
+      recoveryAttempted: recovery?.attempted === true,
+      recoveryCorrelated: recovery?.correlated === true,
+      recoveryDuplicateSuppressed: recovery?.duplicateSuppressed === true,
+      recoveryReason: recovery?.reason || null,
+      recoveryIncidentIdPresent: recovery?.incidentIdPresent === true,
+      recoveryDependency: recovery?.dependency || null,
+      recoveryObservedDurationSeconds:
+        Number.isFinite(Number(recovery?.observedDurationSeconds))
+          ? Number(recovery.observedDurationSeconds)
+          : null,
+      recoveryNotification:
+        recoveryNotification?.notification || null,
+      recoveryNotificationSent:
+        recoveryNotification?.notification === "SENT",
+      recoveryNotificationIdPresent:
+        recoveryNotification?.notificationIdPresent === true,
+      recoveryProviderMessageIdPresent:
+        recoveryNotification?.providerMessageIdPresent === true,
+      recoveryConfirmationAttempted:
+        confirmedRecovery?.attempted === true,
+      recoveryConfirmationReason:
+        confirmedRecovery?.reason || null,
+      incidentsAutoResolved:
+        Number(confirmedRecovery?.resolvedCount || 0),
+      pendingEscalationsSuppressed:
+        Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
+      incidentAutoClosed: false,
+      checks,
+      automaticRemediation: false,
+    };
+
+    if (effectiveStatus === "HEALTHY") {
+      console.log("GA OS scheduled health monitor healthy", log);
+
+      return res.status(200).json({
+        ok: true,
+        service: SERVICE,
+        phase: PHASE,
+        status: "HEALTHY",
+        monitored_phase: data?.phase || "3E.1.2",
+        checked_at: checkedAt,
+        duration_ms: Date.now() - started,
+        registry_persisted: registry?.stored === true,
+        registry_reason: registry?.reason || null,
+        incident_attempted: false,
+        incident_created: false,
+        recovery_attempted: recovery?.attempted === true,
+        recovery_correlated: recovery?.correlated === true,
+        recovery_duplicate_suppressed: recovery?.duplicateSuppressed === true,
+        recovery_reason: recovery?.reason || null,
+        recovery_incident_id_present: recovery?.incidentIdPresent === true,
+        recovery_dependency: recovery?.dependency || null,
+        recovery_observed_duration_seconds:
+          Number.isFinite(Number(recovery?.observedDurationSeconds))
+            ? Number(recovery.observedDurationSeconds)
+            : null,
+        recovery_notification:
+          recoveryNotification?.notification || null,
+        recovery_notification_sent:
+          recoveryNotification?.notification === "SENT",
+        recovery_notification_id_present:
+          recoveryNotification?.notificationIdPresent === true,
+        recovery_provider_message_id_present:
+          recoveryNotification?.providerMessageIdPresent === true,
+        recovery_confirmation_attempted:
+          confirmedRecovery?.attempted === true,
+        recovery_confirmation_reason:
+          confirmedRecovery?.reason || null,
+        incidents_auto_resolved:
+          Number(confirmedRecovery?.resolvedCount || 0),
+        pending_escalations_suppressed:
+          Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
+        incident_auto_closed: false,
+        automatic_remediation: false,
+        checks,
+      });
+    }
+
+    console.error("GA OS scheduled health monitor degraded", log);
+
+    return res.status(503).json({
+      ok: false,
+      service: SERVICE,
+      phase: PHASE,
+      status: effectiveStatus,
+      monitored_phase: data?.phase || "3E.1.2",
+      checked_at: checkedAt,
+      duration_ms: Date.now() - started,
+      registry_persisted: registry?.stored === true,
+      registry_reason: registry?.reason || null,
+      incident_attempted: incident?.attempted === true,
+      incident_created: incident?.created === true,
+      duplicate_suppressed: incident?.duplicateSuppressed === true,
+      incident_status: incident?.status || null,
+      recovery_attempted: recovery?.attempted === true,
+      recovery_correlated: recovery?.correlated === true,
+      recovery_duplicate_suppressed: recovery?.duplicateSuppressed === true,
+      recovery_reason: recovery?.reason || null,
+      recovery_incident_id_present: recovery?.incidentIdPresent === true,
+      recovery_dependency: recovery?.dependency || null,
+      recovery_observed_duration_seconds:
+        Number.isFinite(Number(recovery?.observedDurationSeconds))
+          ? Number(recovery.observedDurationSeconds)
+          : null,
+      recovery_notification:
+        recoveryNotification?.notification || null,
+      recovery_notification_sent:
+        recoveryNotification?.notification === "SENT",
+      recovery_notification_id_present:
+        recoveryNotification?.notificationIdPresent === true,
+      recovery_provider_message_id_present:
+        recoveryNotification?.providerMessageIdPresent === true,
+      recovery_confirmation_attempted:
+        confirmedRecovery?.attempted === true,
+      recovery_confirmation_reason:
+        confirmedRecovery?.reason || null,
+      incidents_auto_resolved:
+        Number(confirmedRecovery?.resolvedCount || 0),
+      pending_escalations_suppressed:
+        Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
+      incident_auto_closed: false,
+      automatic_remediation: false,
+      checks,
+    });
+  } catch (error) {
+    console.error("GA OS scheduled health monitor failed", {
+      phase: PHASE,
+      message: error instanceof Error ? error.message : String(error),
+      durationMs: Date.now() - started,
+      automaticRemediation: false,
+    });
+
+    return res.status(503).json({
+      ok: false,
+      service: SERVICE,
+      phase: PHASE,
+      status: "CRITICAL",
+      error: "Health monitor execution failed.",
+      checked_at: checkedAt,
+      duration_ms: Date.now() - started,
+      registry_persisted: false,
+      incident_attempted: false,
+      incident_created: false,
+      automatic_remediation: false,
+    });
+  }
+}

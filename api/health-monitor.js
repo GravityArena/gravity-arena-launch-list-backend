@@ -1,5 +1,43 @@
 // Gravity Arena GA OS
 // Phase 3E.1.7B - Health Monitoring + Automatic Incident Creation
+import {
+  observeRecoveryState,
+} from "./lib/recovery-confirmation.js";
+
+2. After the current health check has produced `checks` and after registry
+persistence / incident creation logic has run, add:
+
+let confirmedRecovery = {
+  attempted: false,
+  reason: "not_attempted",
+  resolvedCount: 0,
+  pendingEscalationsSuppressed: 0,
+  automaticRemediation: false,
+};
+
+try {
+  confirmedRecovery = await observeRecoveryState({
+    checks,
+    healthEventId:
+      registry?.stored === true && registry?.eventId
+        ? registry.eventId
+        : null,
+  });
+} catch (error) {
+  console.error("GA OS confirmed recovery worker failed", {
+    phase: PHASE,
+    message: error instanceof Error ? error.message : String(error),
+    automaticRemediation: false,
+  });
+
+  confirmedRecovery = {
+    attempted: true,
+    reason: "recovery_confirmation_failed",
+    resolvedCount: 0,
+    pendingEscalationsSuppressed: 0,
+    automaticRemediation: false,
+  };
+}
 
 import {
   persistHealthEvent,

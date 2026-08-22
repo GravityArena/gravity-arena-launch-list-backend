@@ -4,41 +4,6 @@ import {
   observeRecoveryState,
 } from "./lib/recovery-confirmation.js";
 
-2. After the current health check has produced `checks` and after registry
-persistence / incident creation logic has run, add:
-
-let confirmedRecovery = {
-  attempted: false,
-  reason: "not_attempted",
-  resolvedCount: 0,
-  pendingEscalationsSuppressed: 0,
-  automaticRemediation: false,
-};
-
-try {
-  confirmedRecovery = await observeRecoveryState({
-    checks,
-    healthEventId:
-      registry?.stored === true && registry?.eventId
-        ? registry.eventId
-        : null,
-  });
-} catch (error) {
-  console.error("GA OS confirmed recovery worker failed", {
-    phase: PHASE,
-    message: error instanceof Error ? error.message : String(error),
-    automaticRemediation: false,
-  });
-
-  confirmedRecovery = {
-    attempted: true,
-    reason: "recovery_confirmation_failed",
-    resolvedCount: 0,
-    pendingEscalationsSuppressed: 0,
-    automaticRemediation: false,
-  };
-}
-
 import {
   persistHealthEvent,
   readLatestHealthEvent,
@@ -416,6 +381,38 @@ export default async function handler(req, res) {
       };
     }
 
+    let confirmedRecovery = {
+      attempted: false,
+      reason: "not_attempted",
+      resolvedCount: 0,
+      pendingEscalationsSuppressed: 0,
+      automaticRemediation: false,
+    };
+
+    try {
+      confirmedRecovery = await observeRecoveryState({
+        checks,
+        healthEventId:
+          registry?.stored === true && registry?.eventId
+            ? registry.eventId
+            : null,
+      });
+    } catch (error) {
+      console.error("GA OS confirmed recovery worker failed", {
+        phase: PHASE,
+        message: error instanceof Error ? error.message : String(error),
+        automaticRemediation: false,
+      });
+
+      confirmedRecovery = {
+        attempted: true,
+        reason: "recovery_confirmation_failed",
+        resolvedCount: 0,
+        pendingEscalationsSuppressed: 0,
+        automaticRemediation: false,
+      };
+    }
+
     const log = {
       phase: PHASE,
       monitoredPhase: data?.phase || null,
@@ -449,8 +446,14 @@ export default async function handler(req, res) {
         recoveryNotification?.notificationIdPresent === true,
       recoveryProviderMessageIdPresent:
         recoveryNotification?.providerMessageIdPresent === true,
+      recoveryConfirmationAttempted:
+        confirmedRecovery?.attempted === true,
+      recoveryConfirmationReason:
+        confirmedRecovery?.reason || null,
+      incidentsAutoResolved:
+        Number(confirmedRecovery?.resolvedCount || 0),
       pendingEscalationsSuppressed:
-        Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
+        Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
       incidentAutoClosed: false,
       checks,
       automaticRemediation: false,
@@ -489,8 +492,14 @@ export default async function handler(req, res) {
           recoveryNotification?.notificationIdPresent === true,
         recovery_provider_message_id_present:
           recoveryNotification?.providerMessageIdPresent === true,
+        recovery_confirmation_attempted:
+          confirmedRecovery?.attempted === true,
+        recovery_confirmation_reason:
+          confirmedRecovery?.reason || null,
+        incidents_auto_resolved:
+          Number(confirmedRecovery?.resolvedCount || 0),
         pending_escalations_suppressed:
-          Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
+          Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
         incident_auto_closed: false,
         automatic_remediation: false,
         checks,
@@ -531,8 +540,14 @@ export default async function handler(req, res) {
         recoveryNotification?.notificationIdPresent === true,
       recovery_provider_message_id_present:
         recoveryNotification?.providerMessageIdPresent === true,
+      recovery_confirmation_attempted:
+        confirmedRecovery?.attempted === true,
+      recovery_confirmation_reason:
+        confirmedRecovery?.reason || null,
+      incidents_auto_resolved:
+        Number(confirmedRecovery?.resolvedCount || 0),
       pending_escalations_suppressed:
-        Number(recoveryNotification?.pendingEscalationsSuppressed || 0),
+        Number(confirmedRecovery?.pendingEscalationsSuppressed || 0),
       incident_auto_closed: false,
       automatic_remediation: false,
       checks,

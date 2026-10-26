@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { windowFor, redact, sensitive, readMailbox, renderDigest, priorDelivery } from "../lib/email-digest-core.js";
+import { windowFor, redact, sensitive, readMailbox, renderDigest, priorDelivery, sendDigest } from "../lib/email-digest-core.js";
 import handler from "../api/email-summary.js";
 
 test("Tuesday and Friday windows are contiguous and use SAST 08:00", () => {
@@ -75,4 +75,16 @@ test("provider logs suppress a matching report, not unrelated emails", async () 
     assert.equal(prior.found, true);
     assert.equal(prior.messageId, "accepted");
   } finally { global.fetch = original; }
+});
+test("send is founder-only and idempotency key respects provider length limit", async () => {
+  const original = global.fetch;
+  process.env.BREVO_SENDER_EMAIL = "info@gravityarena.co.za";
+  global.fetch = async (url, options) => {
+    const data = JSON.parse(options.body);
+    assert.deepEqual(data.to, [{ email: "sibusiso@gravityarena.co.za", name: "Sibusiso" }]);
+    assert.ok(data.headers.idempotencyKey.length <= 36);
+    return Response.json({ messageId: "accepted" });
+  };
+  try { assert.equal(await sendDigest("Subject", "Body", windowFor()), "accepted"); }
+  finally { global.fetch = original; }
 });

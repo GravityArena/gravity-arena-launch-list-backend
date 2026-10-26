@@ -45,9 +45,10 @@ export default async function handler(req, res) {
     console.info("Gravity Arena digest accepted", { revision: REVISION, windowEnd: window.end });
     return res.status(200).json({ ok: true, revision: REVISION, mode, subject, window,
       accepted: true, delivered: false, messageId, reports: stats, summaryMode: digest.overview.mode, repliesEnabled: false });
-  } catch {
-    console.error("Gravity Arena digest failed", { revision: REVISION, stage });
+  } catch (error) {
+    console.error("Gravity Arena digest failed", { revision: REVISION, stage, code: error?.providerCode || "worker_error" });
     return res.status(502).json({ ok: false, revision: REVISION, stage,
-      error: "digest_failed", sendOutcome: stage === "brevo_send" ? "unknown_check_provider_before_retry" : "not_sent" });
+      error: "digest_failed", providerCode: error?.providerCode, providerMessage: error?.providerMessage,
+      sendOutcome: stage === "brevo_send" ? "unknown_check_provider_before_retry" : "not_sent" });
   }
 }

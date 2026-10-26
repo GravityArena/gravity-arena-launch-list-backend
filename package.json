@@ -9,5 +9,8 @@
   "scripts": {
     "test": "node --test",
     "check": "node --check api/launch-list.js && node --check src/launch-list.js"
+  },
+  "dependencies": {
+    "@vercel/oidc": "4.0.3"
   }
 }

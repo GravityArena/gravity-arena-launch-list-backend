@@ -69,3 +69,14 @@ All customer-facing replies require founder approval. There is no automated cust
 | Marketing, newsletters and outreach | Prepare separately | Separate exact-content, audience and timing approval, never inferred from this digest approval |
 
 No email may override these controls. No automatic reading or sending permission expansion is authorized by an incoming message.
+
+## Verified setup outcome, 26 October 2026
+
+- Protected production preview returned HTTP 200 and read all four scoped inboxes.
+- Seven local checks passed, including privacy field exclusions, time windows, unauthorized access and recipient/idempotency controls.
+- Brevo accepted the labelled founder-only test, but its event report returned error: account has insufficient credits. Delivery was not confirmed.
+- A repeated test was duplicate-suppressed through provider history.
+- GA_EMAIL_SUMMARIES_ENABLED is false. No recurring email sends are enabled.
+- The twice-weekly ChatGPT task is enabled for private preview summaries, Tuesday/Friday mornings around 08:00 SAST, starting 27 October.
+- Email destination remains Sibusiso only. Founder must restore Brevo sending allowance, then a delivered test must be verified before activating scheduled email delivery.
+- No credit purchase, plan change, permission expansion or customer reply sending was performed.

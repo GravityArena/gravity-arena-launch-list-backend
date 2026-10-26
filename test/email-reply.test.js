@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { prepareDraft } from "../lib/email-reply-core.js";
-import { approve, reject, revise, assess, payloadHash } from "../lib/reply-approval.js";
+import { approve, reject, revise, assess, payloadHash, mergeQueue } from "../lib/reply-approval.js";
 import handler from "../api/email-reply-drafts.js";
 const msg = { id:"synthetic-1", conversationId:"thread-1", lastModifiedDateTime:"2026-10-26T18:00:00Z",
   from:{emailAddress:{address:"customer@example.com"}},replyTo:[],subject:"FPV booking enquiry",
@@ -63,4 +63,16 @@ test("draft endpoint is authenticated and never accepts writes",async()=>{
   const res=()=>({setHeader(){},status(code){this.code=code;return this},json(body){this.body=body;return this}});
   let r=res();await handler({method:"POST",headers:{}},r);assert.equal(r.code,405);
   r=res();await handler({method:"GET",headers:{}},r);assert.equal(r.code,401);
+});
+test("queue refresh preserves edited drafts and invalidates approval when source changes",()=>{
+  const draft=prepareDraft("info",msg);
+  const approved=approve(draft,evidence(draft),now);
+  const live={batches:[{mailbox:"info",capped:false,items:[draft]}]};
+  const same=mergeQueue({records:[approved]},live,now);
+  assert.equal(same.records[0].status,"APPROVED_FOR_MANUAL_SEND");
+  const changed={...live,batches:[{mailbox:"info",items:[prepareDraft("info",{...msg,bodyPreview:"New information about FPV"})]}]};
+  const result=mergeQueue(same,changed,now);
+  assert.equal(result.records[0].revision,2);
+  assert.equal(result.records[0].approval,null);
+  assert.equal(result.records[0].audit.length,3);
 });
